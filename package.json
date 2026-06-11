@@ -1,0 +1,27 @@
+{
+  "name": "otoku-auto-worker",
+  "version": "1.0.0",
+  "description": "OtokuVerse Auto Import Worker",
+  "main": "dist/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1062.0",
+    "axios": "^1.17.0",
+    "dotenv": "^17.4.2",
+    "form-data": "^4.0.5",
+    "mysql2": "^3.22.4",
+    "playwright": "^1.60.0",
+    "winston": "^3.19.0"
+  },
+  "devDependencies": {
+    "@types/form-data": "^2.2.1",
+    "@types/node": "^25.9.1",
+    "tsx": "^4.22.4",
+    "typescript": "^5.8.3"
+  }
+}
