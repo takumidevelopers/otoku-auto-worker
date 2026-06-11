@@ -170,3 +170,30 @@ export async function upsertSeriesCategory(params: {
 
   return response.data;
 }
+
+
+export async function getAvailableSeriesSlug(baseSlug: string): Promise<string> {
+  const form = new FormData();
+
+  form.append("base_slug", baseSlug);
+
+  const response = await axios.post(
+    `${config.api.baseUrl}/worker/series_slug_available.php`,
+    form,
+    {
+      headers: {
+        ...form.getHeaders(),
+        Authorization: `Bearer ${config.api.token}`,
+      },
+      timeout: 30000,
+    }
+  );
+
+  if (!response.data?.success || !response.data?.available_slug) {
+    throw new Error(
+      `Available slug check failed: ${JSON.stringify(response.data)}`
+    );
+  }
+
+  return String(response.data.available_slug);
+}

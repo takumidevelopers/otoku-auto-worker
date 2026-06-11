@@ -5,8 +5,9 @@ import {
   upsertSeries,
   upsertChapter,
   upsertSeriesCategory,
+  getAvailableSeriesSlug,
 } from "./otokuApi";
-import { scanMangttoChapters } from "./mangtto";
+import { scanMangttoChapters, ChapterSniffResult } from "./mangtto";
 import { uploadChapterImages } from "./imagePipeline";
 import { searchAniListByTitle } from "./anilist";
 
@@ -57,6 +58,33 @@ function buildSearchName(params: {
     .map((item) => String(item).trim())
     .filter((item, index, arr) => item && arr.indexOf(item) === index)
     .join(" | ");
+}
+
+function chapterFingerprint(chapter: ChapterSniffResult): string {
+  const first = chapter.imageUrls[0] || "";
+  const last = chapter.imageUrls[chapter.imageUrls.length - 1] || "";
+  return `${chapter.imageUrls.length}|${first}|${last}`;
+}
+
+function dedupeChapters(chapters: ChapterSniffResult[]): ChapterSniffResult[] {
+  const seen = new Set<string>();
+  const clean: ChapterSniffResult[] = [];
+
+  for (const chapter of chapters) {
+    const fingerprint = chapterFingerprint(chapter);
+
+    if (seen.has(fingerprint)) {
+      logger.warn(
+        `Duplicate bölüm atlandı | Kaynak Chapter: ${chapter.chapter} | Sayfa: ${chapter.imageUrls.length}`
+      );
+      continue;
+    }
+
+    seen.add(fingerprint);
+    clean.push(chapter);
+  }
+
+  return clean;
 }
 
 const CATEGORY_MAP: Record<string, { categoryId: string; categoryName: string }> = {
@@ -159,22 +187,33 @@ export async function runImportWorker() {
   logger.info(`Job alındı: #${job.id}`);
   logger.info(`Kaynak URL: ${job.source_url}`);
 
-  const seriesSlug = extractSlugFromMangttoUrl(job.source_url);
-  const fallbackTitle = titleFromSlug(seriesSlug);
+  const baseSeriesSlug = extractSlugFromMangttoUrl(job.source_url);
+  let seriesSlug = baseSeriesSlug;
+  const fallbackTitle = titleFromSlug(baseSeriesSlug);
 
   try {
+    seriesSlug = await getAvailableSeriesSlug(baseSeriesSlug);
+
+    logger.info(
+      `Series slug seçildi | Base: ${baseSeriesSlug} | Kullanılan: ${seriesSlug}`
+    );
+
     logger.info(`AniList metadata aranıyor: ${fallbackTitle}`);
     const metadata = await searchAniListByTitle(fallbackTitle);
 
     logger.info("Bölümler taranıyor...");
-    const chapters = await scanMangttoChapters({
+    const scannedChapters = await scanMangttoChapters({
       sourceUrl: job.source_url,
       startChap: Number(job.start_chap),
       endChap: Number(job.end_chap),
       missLimit: 5,
     });
 
-    logger.info(`Toplam bulunan bölüm: ${chapters.length}`);
+    const chapters = dedupeChapters(scannedChapters);
+
+    logger.info(
+      `Toplam bulunan bölüm: ${scannedChapters.length} | Duplicate sonrası: ${chapters.length}`
+    );
 
     if (chapters.length === 0) {
       throw new Error(
@@ -211,21 +250,23 @@ export async function runImportWorker() {
       genres: metadata?.genres || [],
     });
 
+    let displayChapterNumber = 1;
+
     for (const chapter of chapters) {
       const uploadResult = await uploadChapterImages({
-        seriesSlug,
-        chapter: chapter.chapter,
+        seriesSlug: series.seriesuid,
+        chapter: displayChapterNumber,
         imageUrls: chapter.imageUrls,
       });
 
       logger.info(
-        `Bölüm yüklendi | Chapter: ${chapter.chapter} | Page Count: ${uploadResult.pageCount}`
+        `Bölüm yüklendi | Kaynak Chapter: ${chapter.chapter} | Otoku Chapter: ${displayChapterNumber} | Page Count: ${uploadResult.pageCount}`
       );
 
       logger.info(`Chapter Base URL: ${uploadResult.baseUrl}`);
 
-      const eps = String(chapter.chapter);
-      const epsuid = `${seriesSlug}-${chapter.chapter}`;
+      const eps = String(displayChapterNumber);
+      const epsuid = `${series.seriesuid}-${displayChapterNumber}`;
 
       await upsertChapter({
         eps,
@@ -235,8 +276,10 @@ export async function runImportWorker() {
       });
 
       logger.info(
-        `Bölüm DB kaydı tamamlandı | Chapter: ${chapter.chapter} | SeriesUID: ${series.seriesuid}`
+        `Bölüm DB kaydı tamamlandı | Kaynak Chapter: ${chapter.chapter} | Otoku Chapter: ${displayChapterNumber} | SeriesUID: ${series.seriesuid}`
       );
+
+      displayChapterNumber++;
     }
 
     await updateImportJobStatus({
