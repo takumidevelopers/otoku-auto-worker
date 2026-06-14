@@ -1,5 +1,6 @@
 import { logger } from "./logger";
 import {
+  ImportJob,
   getNextImportJob,
   updateImportJobStatus,
   upsertSeries,
@@ -10,6 +11,24 @@ import {
 import { scanMangttoChapters, ChapterSniffResult } from "./mangtto";
 import { uploadChapterImages } from "./imagePipeline";
 import { searchAniListByTitle } from "./anilist";
+import {
+  scanSiyahMelekApiChapters,
+  SiyahMelekStorageType,
+} from "./siyahmelekApi";
+
+function slugify(input: string): string {
+  return input
+    .toLowerCase()
+    .trim()
+    .replace(/ğ/g, "g")
+    .replace(/ü/g, "u")
+    .replace(/ş/g, "s")
+    .replace(/ı/g, "i")
+    .replace(/ö/g, "o")
+    .replace(/ç/g, "c")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
 
 function extractSlugFromMangttoUrl(url: string): string {
   const clean = url.split("#")[0].replace(/\/$/, "");
@@ -144,11 +163,16 @@ const CATEGORY_MAP: Record<string, { categoryId: string; categoryName: string }>
     categoryId: "90fccd80-b39c-1f93-a586-e5430daa0084",
     categoryName: "Gerilim",
   },
+  Adult: {
+    categoryId: "1eb95b00-9907-1f87-9f0f-3bf7876439e9",
+    categoryName: "+18",
+  },
 };
 
 async function applyCategories(params: {
   seriesId: string;
   genres: string[];
+  forceAdult?: boolean;
 }) {
   for (const genre of params.genres) {
     const mapped = CATEGORY_MAP[genre];
@@ -174,6 +198,241 @@ async function applyCategories(params: {
   });
 
   logger.info("Varsayılan kategori eklendi | Manga");
+
+  if (params.forceAdult) {
+    await upsertSeriesCategory({
+      seriesId: params.seriesId,
+      categoryId: CATEGORY_MAP.Adult.categoryId,
+      categoryName: CATEGORY_MAP.Adult.categoryName,
+    });
+
+    logger.info("Zorunlu kategori eklendi | +18");
+  }
+}
+
+function normalizeStorageType(value: unknown): SiyahMelekStorageType {
+  const clean = String(value || "auto").trim().toLowerCase();
+
+  if (clean === "amazon" || clean === "uploads" || clean === "auto") {
+    return clean;
+  }
+
+  return "auto";
+}
+
+function normalizeSource(job: ImportJob): string {
+  return String(job.source || "mangtto").trim().toLowerCase();
+}
+
+function getSiyahMelekSeriesName(job: ImportJob): string {
+  const nameFromForm = String(job.source_name || "").trim();
+
+  if (!nameFromForm || nameFromForm === "siyahmelek_api") {
+    throw new Error("SiyahMelek API job için formdan gelen seri adı boş olamaz.");
+  }
+
+  return nameFromForm;
+}
+
+async function runSiyahMelekApiJob(job: ImportJob) {
+  const externalSeriesId = String(job.external_series_id || "").trim();
+
+  if (!externalSeriesId) {
+    throw new Error("SiyahMelek API job için external_series_id boş olamaz.");
+  }
+
+  const seriesName = getSiyahMelekSeriesName(job);
+
+  const baseSlug = slugify(seriesName);
+  let seriesSlug = baseSlug || `siyahmelek-${externalSeriesId}`;
+
+  seriesSlug = await getAvailableSeriesSlug(seriesSlug);
+
+  logger.info(
+    `SiyahMelek seri slug seçildi | Form Seri Adı: ${seriesName} | Slug: ${seriesSlug}`
+  );
+
+  const chapters = await scanSiyahMelekApiChapters({
+    externalSeriesId,
+    startChap: Number(job.start_chap),
+    endChap: Number(job.end_chap),
+    storageType: normalizeStorageType(job.storage_type),
+    pageStart: Number(job.page_start || 1),
+    pageMax: Number(job.page_max || 160),
+    missingLimit: 5,
+  });
+
+  if (chapters.length === 0) {
+    throw new Error("SiyahMelek API üzerinden hiç bölüm bulunamadı.");
+  }
+
+  const series = await upsertSeries({
+    name: seriesName,
+    seriesuid: seriesSlug,
+    coverImageUrl: "",
+    des: "Henüz açıklama eklenmedi.",
+    kaynak: "SiyahMelek",
+    final: "Devam Ediyor",
+    searchName: seriesName,
+  });
+
+  logger.info(
+    `SiyahMelek seri oluşturuldu/güncellendi | ID: ${series.series_id} | UID: ${series.seriesuid} | Name: ${seriesName}`
+  );
+
+  await applyCategories({
+    seriesId: series.seriesuid,
+    genres: [],
+    forceAdult: true,
+  });
+
+  let displayChapterNumber = 1;
+
+  for (const chapter of chapters) {
+    const uploadResult = await uploadChapterImages({
+      seriesSlug: series.seriesuid,
+      chapter: displayChapterNumber,
+      imageUrls: chapter.imageUrls,
+      source: "siyahmelek_api",
+    });
+
+    logger.info(
+      `SiyahMelek bölüm yüklendi | Kaynak Chapter: ${chapter.chapter} | Otoku Chapter: ${displayChapterNumber} | Page Count: ${uploadResult.pageCount}`
+    );
+
+    const eps = String(displayChapterNumber);
+    const epsuid = `${series.seriesuid}-${displayChapterNumber}`;
+
+    await upsertChapter({
+      eps,
+      epsuid,
+      seriesId: series.seriesuid,
+      chapterurl: uploadResult.baseUrl,
+    });
+
+    logger.info(
+      `SiyahMelek bölüm DB kaydı tamamlandı | Kaynak Chapter: ${chapter.chapter} | Otoku Chapter: ${displayChapterNumber}`
+    );
+
+    displayChapterNumber++;
+  }
+
+  await updateImportJobStatus({
+    jobId: job.id,
+    status: "completed",
+    seriesId: series.seriesuid,
+    seriesName,
+  });
+
+  logger.info(`SiyahMelek API job tamamlandı: #${job.id}`);
+}
+
+async function runMangttoJob(job: ImportJob) {
+  logger.info(`Kaynak URL: ${job.source_url}`);
+
+  const baseSeriesSlug = extractSlugFromMangttoUrl(job.source_url);
+  let seriesSlug = baseSeriesSlug;
+  const fallbackTitle = titleFromSlug(baseSeriesSlug);
+
+  seriesSlug = await getAvailableSeriesSlug(baseSeriesSlug);
+
+  logger.info(
+    `Series slug seçildi | Base: ${baseSeriesSlug} | Kullanılan: ${seriesSlug}`
+  );
+
+  logger.info(`AniList metadata aranıyor: ${fallbackTitle}`);
+  const metadata = await searchAniListByTitle(fallbackTitle);
+
+  logger.info("Bölümler taranıyor...");
+  const scannedChapters = await scanMangttoChapters({
+    sourceUrl: job.source_url,
+    startChap: Number(job.start_chap),
+    endChap: Number(job.end_chap),
+    missLimit: 5,
+  });
+
+  const chapters = dedupeChapters(scannedChapters);
+
+  logger.info(
+    `Toplam bulunan bölüm: ${scannedChapters.length} | Duplicate sonrası: ${chapters.length}`
+  );
+
+  if (chapters.length === 0) {
+    throw new Error(
+      "Hiç bölüm bulunamadı. Seri DB'ye eklenmedi. Kaynak URL, bölüm aralığı veya scraper filtresi kontrol edilmeli."
+    );
+  }
+
+  const seriesName = metadata?.titleRomaji || fallbackTitle;
+
+  const searchName = buildSearchName({
+    titleRomaji: metadata?.titleRomaji,
+    titleEnglish: metadata?.titleEnglish,
+    titleNative: metadata?.titleNative,
+    synonyms: metadata?.synonyms || [],
+    fallbackTitle,
+  });
+
+  const series = await upsertSeries({
+    name: seriesName,
+    seriesuid: seriesSlug,
+    coverImageUrl: metadata?.coverImage || "",
+    des: "Açıklama henüz eklenmemiş görünüyor...",
+    kaynak: "",
+    final: mapAniListStatus(metadata?.status || null),
+    searchName,
+  });
+
+  logger.info(
+    `Seri oluşturuldu/güncellendi | ID: ${series.series_id} | UID: ${series.seriesuid}`
+  );
+
+  await applyCategories({
+    seriesId: series.seriesuid,
+    genres: metadata?.genres || [],
+  });
+
+  let displayChapterNumber = 1;
+
+  for (const chapter of chapters) {
+    const uploadResult = await uploadChapterImages({
+      seriesSlug: series.seriesuid,
+      chapter: displayChapterNumber,
+      imageUrls: chapter.imageUrls,
+      source: "mangtto",
+    });
+
+    logger.info(
+      `Bölüm yüklendi | Kaynak Chapter: ${chapter.chapter} | Otoku Chapter: ${displayChapterNumber} | Page Count: ${uploadResult.pageCount}`
+    );
+
+    logger.info(`Chapter Base URL: ${uploadResult.baseUrl}`);
+
+    const eps = String(displayChapterNumber);
+    const epsuid = `${series.seriesuid}-${displayChapterNumber}`;
+
+    await upsertChapter({
+      eps,
+      epsuid,
+      seriesId: series.seriesuid,
+      chapterurl: uploadResult.baseUrl,
+    });
+
+    logger.info(
+      `Bölüm DB kaydı tamamlandı | Kaynak Chapter: ${chapter.chapter} | Otoku Chapter: ${displayChapterNumber} | SeriesUID: ${series.seriesuid}`
+    );
+
+    displayChapterNumber++;
+  }
+
+  await updateImportJobStatus({
+    jobId: job.id,
+    status: "completed",
+    seriesId: series.seriesuid,
+    seriesName,
+  });
+
+  logger.info(`Mangtto job tamamlandı: #${job.id}`);
 }
 
 export async function runImportWorker() {
@@ -184,123 +443,58 @@ export async function runImportWorker() {
     return;
   }
 
-  logger.info(`Job alındı: #${job.id}`);
-  logger.info(`Kaynak URL: ${job.source_url}`);
+  const rawSource = normalizeSource(job);
 
-  const baseSeriesSlug = extractSlugFromMangttoUrl(job.source_url);
-  let seriesSlug = baseSeriesSlug;
-  const fallbackTitle = titleFromSlug(baseSeriesSlug);
+  logger.info(`Job alındı: #${job.id}`);
+  logger.info(`Raw source: ${rawSource}`);
+  logger.info(`Job payload: ${JSON.stringify(job)}`);
 
   try {
-    seriesSlug = await getAvailableSeriesSlug(baseSeriesSlug);
-
-    logger.info(
-      `Series slug seçildi | Base: ${baseSeriesSlug} | Kullanılan: ${seriesSlug}`
-    );
-
-    logger.info(`AniList metadata aranıyor: ${fallbackTitle}`);
-    const metadata = await searchAniListByTitle(fallbackTitle);
-
-    logger.info("Bölümler taranıyor...");
-    const scannedChapters = await scanMangttoChapters({
-      sourceUrl: job.source_url,
-      startChap: Number(job.start_chap),
-      endChap: Number(job.end_chap),
-      missLimit: 5,
-    });
-
-    const chapters = dedupeChapters(scannedChapters);
-
-    logger.info(
-      `Toplam bulunan bölüm: ${scannedChapters.length} | Duplicate sonrası: ${chapters.length}`
-    );
-
-    if (chapters.length === 0) {
-      throw new Error(
-        "Hiç bölüm bulunamadı. Seri DB'ye eklenmedi. Kaynak URL, bölüm aralığı veya scraper filtresi kontrol edilmeli."
-      );
+    if (rawSource === "siyahmelek_api") {
+      logger.info("SiyahMelek API branch seçildi.");
+      await runSiyahMelekApiJob(job);
+      return;
     }
 
-    const seriesName = metadata?.titleRomaji || fallbackTitle;
-
-    const searchName = buildSearchName({
-      titleRomaji: metadata?.titleRomaji,
-      titleEnglish: metadata?.titleEnglish,
-      titleNative: metadata?.titleNative,
-      synonyms: metadata?.synonyms || [],
-      fallbackTitle,
-    });
-
-    const series = await upsertSeries({
-      name: seriesName,
-      seriesuid: seriesSlug,
-      coverImageUrl: metadata?.coverImage || "",
-      des: "Açıklama henüz eklenmemiş görünüyor...",
-      kaynak: "",
-      final: mapAniListStatus(metadata?.status || null),
-      searchName,
-    });
-
-    logger.info(
-      `Seri oluşturuldu/güncellendi | ID: ${series.series_id} | UID: ${series.seriesuid}`
-    );
-
-    await applyCategories({
-      seriesId: series.seriesuid,
-      genres: metadata?.genres || [],
-    });
-
-    let displayChapterNumber = 1;
-
-    for (const chapter of chapters) {
-      const uploadResult = await uploadChapterImages({
-        seriesSlug: series.seriesuid,
-        chapter: displayChapterNumber,
-        imageUrls: chapter.imageUrls,
-      });
-
-      logger.info(
-        `Bölüm yüklendi | Kaynak Chapter: ${chapter.chapter} | Otoku Chapter: ${displayChapterNumber} | Page Count: ${uploadResult.pageCount}`
-      );
-
-      logger.info(`Chapter Base URL: ${uploadResult.baseUrl}`);
-
-      const eps = String(displayChapterNumber);
-      const epsuid = `${series.seriesuid}-${displayChapterNumber}`;
-
-      await upsertChapter({
-        eps,
-        epsuid,
-        seriesId: series.seriesuid,
-        chapterurl: uploadResult.baseUrl,
-      });
-
-      logger.info(
-        `Bölüm DB kaydı tamamlandı | Kaynak Chapter: ${chapter.chapter} | Otoku Chapter: ${displayChapterNumber} | SeriesUID: ${series.seriesuid}`
-      );
-
-      displayChapterNumber++;
-    }
-
-    await updateImportJobStatus({
-      jobId: job.id,
-      status: "completed",
-      seriesId: series.seriesuid,
-      seriesName,
-    });
-
-    logger.info(`Job tamamlandı: #${job.id}`);
+    logger.info("Mangtto branch seçildi.");
+    await runMangttoJob(job);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const anyErr = err as any;
 
-    logger.error(`Job failed: ${message}`);
+    const message =
+      err instanceof Error
+        ? err.message
+        : typeof err === "string"
+          ? err
+          : JSON.stringify(err);
+
+    const failedUrl = anyErr?.config?.url ? String(anyErr.config.url) : "";
+    const status = anyErr?.response?.status
+      ? String(anyErr.response.status)
+      : "";
+    const responseData = anyErr?.response?.data
+      ? typeof anyErr.response.data === "string"
+        ? anyErr.response.data
+        : JSON.stringify(anyErr.response.data)
+      : "";
+
+    const fullErrorMessage = [
+      message,
+      failedUrl ? `URL: ${failedUrl}` : "",
+      status ? `STATUS: ${status}` : "",
+      responseData ? `RESPONSE: ${responseData}` : "",
+    ]
+      .filter(Boolean)
+      .join(" | ");
+
+    logger.error(`Job failed: ${fullErrorMessage}`);
 
     await updateImportJobStatus({
       jobId: job.id,
       status: "failed",
-      seriesId: seriesSlug,
-      seriesName: fallbackTitle,
-      errorMessage: message,
+      seriesId: job.series_id || null,
+      seriesName: job.series_name || job.source_name || null,
+      errorMessage: fullErrorMessage,
     });
 
     throw err;

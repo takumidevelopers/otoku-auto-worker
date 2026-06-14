@@ -10,14 +10,25 @@ function getPageBaseUrl(seriesSlug: string, chapter: number): string {
   return `${process.env.B2_DOWNLOAD_BASE}/${seriesSlug}/${chapter}`;
 }
 
-async function downloadImageBuffer(url: string): Promise<Buffer> {
-  const response = await axios.get<ArrayBuffer>(url, {
+function getReferer(source?: string): string {
+  if (source === "siyahmelek_api") {
+    return "https://siyahmelek.site/";
+  }
+
+  return "https://mangtto.com/";
+}
+
+async function downloadImageBuffer(params: {
+  url: string;
+  source?: string;
+}): Promise<Buffer> {
+  const response = await axios.get<ArrayBuffer>(params.url, {
     responseType: "arraybuffer",
     timeout: 30000,
     headers: {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-      Referer: "https://mangtto.com/",
+      Referer: getReferer(params.source),
     },
   });
 
@@ -61,6 +72,7 @@ export async function uploadChapterImages(params: {
   seriesSlug: string;
   chapter: number;
   imageUrls: string[];
+  source?: string;
 }): Promise<UploadedChapterResult> {
   const pageUrls: string[] = [];
 
@@ -76,7 +88,10 @@ export async function uploadChapterImages(params: {
     );
 
     const publicUrl = await withRetry(async () => {
-      const buffer = await downloadImageBuffer(imageUrl);
+      const buffer = await downloadImageBuffer({
+        url: imageUrl,
+        source: params.source,
+      });
 
       return uploadBufferToB2({
         key,

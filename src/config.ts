@@ -20,8 +20,15 @@ export const config = {
   },
 
   worker: {
+    source: process.env.WORKER_SOURCE || "all",
     concurrency: Number(process.env.WORKER_CONCURRENCY || 5),
     retryCount: Number(process.env.WORKER_RETRY_COUNT || 5),
     retryDelay: Number(process.env.WORKER_RETRY_DELAY || 1000),
+  },
+
+  siyahmelek: {
+    pageStart: Number(process.env.SIYAHMELEK_PAGE_START || 1),
+    pageMax: Number(process.env.SIYAHMELEK_PAGE_MAX || 160),
+    missingLimit: Number(process.env.SIYAHMELEK_MISSING_LIMIT || 5),
   },
 };
