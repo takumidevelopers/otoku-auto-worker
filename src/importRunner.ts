@@ -16,6 +16,13 @@ import {
   SiyahMelekStorageType,
 } from "./siyahmelekApi";
 
+export type ImportRunResult = {
+  hasJob: boolean;
+  completed: boolean;
+  chapterCount: number;
+  jobId?: number;
+};
+
 function slugify(input: string): string {
   return input
     .toLowerCase()
@@ -234,7 +241,7 @@ function getSiyahMelekSeriesName(job: ImportJob): string {
   return nameFromForm;
 }
 
-async function runSiyahMelekApiJob(job: ImportJob) {
+async function runSiyahMelekApiJob(job: ImportJob): Promise<number> {
   const externalSeriesId = String(job.external_series_id || "").trim();
 
   if (!externalSeriesId) {
@@ -325,9 +332,11 @@ async function runSiyahMelekApiJob(job: ImportJob) {
   });
 
   logger.info(`SiyahMelek API job tamamlandı: #${job.id}`);
+
+  return displayChapterNumber - 1;
 }
 
-async function runMangttoJob(job: ImportJob) {
+async function runMangttoJob(job: ImportJob): Promise<number> {
   logger.info(`Kaynak URL: ${job.source_url}`);
 
   const baseSeriesSlug = extractSlugFromMangttoUrl(job.source_url);
@@ -433,14 +442,21 @@ async function runMangttoJob(job: ImportJob) {
   });
 
   logger.info(`Mangtto job tamamlandı: #${job.id}`);
+
+  return displayChapterNumber - 1;
 }
 
-export async function runImportWorker() {
+export async function runImportWorker(): Promise<ImportRunResult> {
   const job = await getNextImportJob();
 
   if (!job) {
     logger.info("Bekleyen import job yok.");
-    return;
+
+    return {
+      hasJob: false,
+      completed: true,
+      chapterCount: 0,
+    };
   }
 
   const rawSource = normalizeSource(job);
@@ -450,14 +466,22 @@ export async function runImportWorker() {
   logger.info(`Job payload: ${JSON.stringify(job)}`);
 
   try {
+    let chapterCount = 0;
+
     if (rawSource === "siyahmelek_api") {
       logger.info("SiyahMelek API branch seçildi.");
-      await runSiyahMelekApiJob(job);
-      return;
+      chapterCount = await runSiyahMelekApiJob(job);
+    } else {
+      logger.info("Mangtto branch seçildi.");
+      chapterCount = await runMangttoJob(job);
     }
 
-    logger.info("Mangtto branch seçildi.");
-    await runMangttoJob(job);
+    return {
+      hasJob: true,
+      completed: true,
+      chapterCount,
+      jobId: job.id,
+    };
   } catch (err) {
     const anyErr = err as any;
 
