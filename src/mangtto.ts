@@ -15,6 +15,15 @@ const BLOCKED_IMAGE_PARTS = [
   "doubleclick",
   "google",
   "facebook",
+  "/_ipx/",
+  "mangtto-hd.png",
+  "thumbnail",
+  "thumb",
+  "profile",
+  "icon",
+  "character",
+  "portrait",
+  "default",
 ];
 
 const ALLOWED_IMAGE_HOST_PARTS = [

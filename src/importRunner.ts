@@ -16,6 +16,8 @@ import {
   SiyahMelekStorageType,
 } from "./siyahmelekApi";
 
+const FORCE_EXISTING_SERIES_MODE = true;
+
 export type ImportRunResult = {
   hasJob: boolean;
   completed: boolean;
@@ -343,10 +345,12 @@ async function runMangttoJob(job: ImportJob): Promise<number> {
   let seriesSlug = baseSeriesSlug;
   const fallbackTitle = titleFromSlug(baseSeriesSlug);
 
-  seriesSlug = await getAvailableSeriesSlug(baseSeriesSlug);
+  if (!FORCE_EXISTING_SERIES_MODE) {
+    seriesSlug = await getAvailableSeriesSlug(baseSeriesSlug);
+  }
 
   logger.info(
-    `Series slug seçildi | Base: ${baseSeriesSlug} | Kullanılan: ${seriesSlug}`
+    `Series slug seçildi | Base: ${baseSeriesSlug} | Kullanılan: ${seriesSlug} | ExistingMode: ${FORCE_EXISTING_SERIES_MODE}`
   );
 
   logger.info(`AniList metadata aranıyor: ${fallbackTitle}`);
