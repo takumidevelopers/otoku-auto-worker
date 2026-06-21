@@ -1,6 +1,9 @@
 import axios from "axios";
+import probe from "probe-image-size";
 import { uploadBufferToB2 } from "./b2";
 import { logger } from "./logger";
+
+const STRICT_MANGA_FILTER = true;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -61,6 +64,44 @@ async function withRetry<T>(
   throw lastError;
 }
 
+function shouldSkipImage(buffer: Buffer, imageUrl: string): boolean {
+  if (!STRICT_MANGA_FILTER) return false;
+
+  try {
+    const info = probe.sync(buffer);
+
+    if (!info?.width || !info?.height) {
+      logger.warn(`SKIP_INVALID_IMAGE | ${imageUrl}`);
+      return true;
+    }
+
+    const isTooSmall = info.width < 500 || info.height < 700;
+
+    const isSquareLike =
+      info.width > 700 &&
+      info.height > 700 &&
+      Math.abs(info.width - info.height) < 120;
+
+    if (isTooSmall || isSquareLike) {
+      logger.warn(
+        `SKIP_NON_MANGA_IMAGE | ${info.width}x${info.height} | ${imageUrl}`
+      );
+      return true;
+    }
+
+    logger.info(`IMAGE_OK | ${info.width}x${info.height} | ${imageUrl}`);
+    return false;
+  } catch (err) {
+    logger.warn(
+      `IMAGE_SIZE_CHECK_FAILED | ${imageUrl} | ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    );
+
+    return true;
+  }
+}
+
 export type UploadedChapterResult = {
   chapter: number;
   pageCount: number;
@@ -79,12 +120,10 @@ export async function uploadChapterImages(params: {
   for (let i = 0; i < params.imageUrls.length; i++) {
     const imageUrl = params.imageUrls[i];
 
-    const pageNumber = i + 1;
-
-    const key = `${params.seriesSlug}/${params.chapter}/${pageNumber}.jpg`;
-
     logger.info(
-      `İndiriliyor ve yükleniyor | Chapter ${params.chapter} | Page ${pageNumber}`
+      `İndiriliyor ve kontrol ediliyor | Chapter ${params.chapter} | Source Index ${
+        i + 1
+      } | ${imageUrl}`
     );
 
     const publicUrl = await withRetry(async () => {
@@ -93,12 +132,27 @@ export async function uploadChapterImages(params: {
         source: params.source,
       });
 
+      if (shouldSkipImage(buffer, imageUrl)) {
+        return "";
+      }
+
+      const pageNumber = pageUrls.length + 1;
+      const key = `${params.seriesSlug}/${params.chapter}/${pageNumber}.jpg`;
+
+      logger.info(
+        `Yükleniyor | Chapter ${params.chapter} | Page ${pageNumber} | ${key}`
+      );
+
       return uploadBufferToB2({
         key,
         buffer,
         contentType: "image/jpeg",
       });
     });
+
+    if (!publicUrl) {
+      continue;
+    }
 
     pageUrls.push(publicUrl);
 
