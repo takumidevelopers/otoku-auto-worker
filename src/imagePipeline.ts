@@ -1,9 +1,11 @@
 import axios from "axios";
 import probe from "probe-image-size";
+import sharp from "sharp";
 import { uploadBufferToB2 } from "./b2";
 import { logger } from "./logger";
 
 const STRICT_MANGA_FILTER = true;
+const MAX_IMAGE_HEIGHT = 4096;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -102,6 +104,52 @@ function shouldSkipImage(buffer: Buffer, imageUrl: string): boolean {
   }
 }
 
+async function resizeImageIfTooLong(buffer: Buffer, imageUrl: string): Promise<Buffer> {
+  try {
+    const metadata = await sharp(buffer).metadata();
+
+    if (!metadata.width || !metadata.height) {
+      logger.warn(`RESIZE_SKIPPED_INVALID_METADATA | ${imageUrl}`);
+      return buffer;
+    }
+
+    if (metadata.height <= MAX_IMAGE_HEIGHT) {
+      logger.info(
+        `RESIZE_NOT_NEEDED | ${metadata.width}x${metadata.height} | ${imageUrl}`
+      );
+      return buffer;
+    }
+
+    const ratio = MAX_IMAGE_HEIGHT / metadata.height;
+    const newWidth = Math.round(metadata.width * ratio);
+
+    logger.info(
+      `RESIZE_IMAGE | ${metadata.width}x${metadata.height} -> ${newWidth}x${MAX_IMAGE_HEIGHT} | ${imageUrl}`
+    );
+
+    return await sharp(buffer)
+      .resize({
+        width: newWidth,
+        height: MAX_IMAGE_HEIGHT,
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .jpeg({
+        quality: 95,
+        mozjpeg: true,
+      })
+      .toBuffer();
+  } catch (err) {
+    logger.warn(
+      `RESIZE_IMAGE_FAILED | ${imageUrl} | ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    );
+
+    return buffer;
+  }
+}
+
 export type UploadedChapterResult = {
   chapter: number;
   pageCount: number;
@@ -127,7 +175,7 @@ export async function uploadChapterImages(params: {
     );
 
     const publicUrl = await withRetry(async () => {
-      const buffer = await downloadImageBuffer({
+      let buffer = await downloadImageBuffer({
         url: imageUrl,
         source: params.source,
       });
@@ -135,6 +183,8 @@ export async function uploadChapterImages(params: {
       if (shouldSkipImage(buffer, imageUrl)) {
         return "";
       }
+
+      buffer = await resizeImageIfTooLong(buffer, imageUrl);
 
       const pageNumber = pageUrls.length + 1;
       const key = `${params.seriesSlug}/${params.chapter}/${pageNumber}.jpg`;
