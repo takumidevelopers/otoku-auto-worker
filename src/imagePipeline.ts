@@ -8,6 +8,10 @@ const STRICT_MANGA_FILTER = true;
 const MAX_IMAGE_HEIGHT = 4096;
 const JPEG_QUALITY = 95;
 
+// 490px geniş manga sayfaları vardı; 500 olursa gerçek sayfayı çöpe atıyor.
+const MIN_MANGA_WIDTH = 420;
+const MIN_MANGA_HEIGHT = 700;
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -77,7 +81,8 @@ function shouldSkipImage(buffer: Buffer, imageUrl: string): boolean {
       return true;
     }
 
-    const isTooSmall = info.width < 500 || info.height < 700;
+    const isTooSmall =
+      info.width < MIN_MANGA_WIDTH || info.height < MIN_MANGA_HEIGHT;
 
     const isSquareLike =
       info.width > 700 &&
@@ -86,7 +91,7 @@ function shouldSkipImage(buffer: Buffer, imageUrl: string): boolean {
 
     if (isTooSmall || isSquareLike) {
       logger.warn(
-        `SKIP_NON_MANGA_IMAGE | ${info.width}x${info.height} | ${imageUrl}`
+        `SKIP_NON_MANGA_IMAGE | ${info.width}x${info.height} | min=${MIN_MANGA_WIDTH}x${MIN_MANGA_HEIGHT} | ${imageUrl}`
       );
       return true;
     }
