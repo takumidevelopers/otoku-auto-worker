@@ -1,6 +1,8 @@
 import { chromium, Page, Response } from "playwright";
 import { logger } from "./logger";
 
+const ENABLE_HALF_CHAPTERS = false;
+
 const IMG_RE =
   /https?:\/\/[^\s"'\\]+?\.(?:jpg|jpeg|png|webp|avif|gif)(?:\?[^\s"'\\]*)?/gi;
 
@@ -42,10 +44,7 @@ export type ChapterSniffResult = {
 };
 
 function formatChapter(chapter: number): string {
-  if (Number.isInteger(chapter)) {
-    return String(chapter);
-  }
-
+  if (Number.isInteger(chapter)) return String(chapter);
   return Number(chapter.toFixed(2)).toString();
 }
 
@@ -100,9 +99,7 @@ function extractPageNumber(url: string): number {
 
   for (const pattern of patterns) {
     const match = clean.match(pattern);
-    if (match?.[1]) {
-      return Number(match[1]);
-    }
+    if (match?.[1]) return Number(match[1]);
   }
 
   return 999999;
@@ -116,7 +113,6 @@ function uniqueSortedImages(urls: string[]): string[] {
       const pageB = extractPageNumber(b);
 
       if (pageA !== pageB) return pageA - pageB;
-
       return a.localeCompare(b);
     });
 }
@@ -134,9 +130,7 @@ async function collectImagesFromDom(page: Page): Promise<string[]> {
         .filter(Boolean);
 
       for (const part of parts) {
-        if (part.startsWith("http")) {
-          urls.add(part);
-        }
+        if (part.startsWith("http")) urls.add(part);
       }
     };
 
@@ -157,7 +151,8 @@ async function collectImagesFromDom(page: Page): Promise<string[]> {
 
     document.querySelectorAll("[style]").forEach((el) => {
       const style = el.getAttribute("style") || "";
-      const matches = style.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/gi) || [];
+      const matches =
+        style.match(/url\(["']?(https?:\/\/[^"')]+)["']?\)/gi) || [];
 
       for (const match of matches) {
         const url = match
@@ -277,6 +272,17 @@ async function sniffChapter(
 function buildChapterList(startChap: number, endChap: number): number[] {
   const chapters: number[] = [];
 
+  if (!ENABLE_HALF_CHAPTERS) {
+    const start = Math.ceil(startChap);
+    const end = Math.floor(endChap);
+
+    for (let value = start; value <= end; value++) {
+      chapters.push(value);
+    }
+
+    return chapters;
+  }
+
   const start = Math.round(startChap * 2);
   const end = Math.round(endChap * 2);
 
@@ -300,7 +306,7 @@ export async function scanMangttoChapters(params: {
   const chapterList = buildChapterList(params.startChap, params.endChap);
 
   logger.info(
-    `Tarama listesi hazırlandı | ${chapterList
+    `Tarama listesi hazırlandı | halfChapters=${ENABLE_HALF_CHAPTERS} | ${chapterList
       .map(formatChapter)
       .join(", ")}`
   );
