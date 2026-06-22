@@ -6,6 +6,7 @@ import { logger } from "./logger";
 
 const STRICT_MANGA_FILTER = true;
 const MAX_IMAGE_HEIGHT = 4096;
+const JPEG_QUALITY = 95;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -52,7 +53,6 @@ async function withRetry<T>(
       return await task();
     } catch (err) {
       lastError = err;
-
       const delay = baseDelayMs * Math.pow(2, attempt - 1);
 
       logger.warn(
@@ -104,49 +104,68 @@ function shouldSkipImage(buffer: Buffer, imageUrl: string): boolean {
   }
 }
 
-async function resizeImageIfTooLong(buffer: Buffer, imageUrl: string): Promise<Buffer> {
+async function splitImageIfTooLong(
+  buffer: Buffer,
+  imageUrl: string
+): Promise<Buffer[]> {
   try {
-    const metadata = await sharp(buffer).metadata();
+    const metadata = await sharp(buffer, { limitInputPixels: false }).metadata();
 
     if (!metadata.width || !metadata.height) {
-      logger.warn(`RESIZE_SKIPPED_INVALID_METADATA | ${imageUrl}`);
-      return buffer;
+      logger.warn(`SPLIT_SKIPPED_INVALID_METADATA | ${imageUrl}`);
+      return [buffer];
     }
 
     if (metadata.height <= MAX_IMAGE_HEIGHT) {
       logger.info(
-        `RESIZE_NOT_NEEDED | ${metadata.width}x${metadata.height} | ${imageUrl}`
+        `SPLIT_NOT_NEEDED | ${metadata.width}x${metadata.height} | ${imageUrl}`
       );
-      return buffer;
+
+      const normalized = await sharp(buffer, { limitInputPixels: false })
+        .jpeg({ quality: JPEG_QUALITY, mozjpeg: true })
+        .toBuffer();
+
+      return [normalized];
     }
 
-    const ratio = MAX_IMAGE_HEIGHT / metadata.height;
-    const newWidth = Math.round(metadata.width * ratio);
+    const parts: Buffer[] = [];
+
+    for (let top = 0; top < metadata.height; top += MAX_IMAGE_HEIGHT) {
+      const sliceHeight = Math.min(MAX_IMAGE_HEIGHT, metadata.height - top);
+
+      const part = await sharp(buffer, { limitInputPixels: false })
+        .extract({
+          left: 0,
+          top,
+          width: metadata.width,
+          height: sliceHeight,
+        })
+        .jpeg({
+          quality: JPEG_QUALITY,
+          mozjpeg: true,
+        })
+        .toBuffer();
+
+      parts.push(part);
+
+      logger.info(
+        `SPLIT_PART | ${metadata.width}x${metadata.height} | top=${top} | height=${sliceHeight} | ${imageUrl}`
+      );
+    }
 
     logger.info(
-      `RESIZE_IMAGE | ${metadata.width}x${metadata.height} -> ${newWidth}x${MAX_IMAGE_HEIGHT} | ${imageUrl}`
+      `SPLIT_IMAGE | ${metadata.width}x${metadata.height} -> ${parts.length} parça | ${imageUrl}`
     );
 
-    return await sharp(buffer)
-      .resize({
-        width: newWidth,
-        height: MAX_IMAGE_HEIGHT,
-        fit: "inside",
-        withoutEnlargement: true,
-      })
-      .jpeg({
-        quality: 95,
-        mozjpeg: true,
-      })
-      .toBuffer();
+    return parts;
   } catch (err) {
     logger.warn(
-      `RESIZE_IMAGE_FAILED | ${imageUrl} | ${
+      `SPLIT_IMAGE_FAILED | ${imageUrl} | ${
         err instanceof Error ? err.message : String(err)
       }`
     );
 
-    return buffer;
+    return [buffer];
   }
 }
 
@@ -174,39 +193,44 @@ export async function uploadChapterImages(params: {
       } | ${imageUrl}`
     );
 
-    const publicUrl = await withRetry(async () => {
-      let buffer = await downloadImageBuffer({
+    const uploadedUrls = await withRetry(async () => {
+      const buffer = await downloadImageBuffer({
         url: imageUrl,
         source: params.source,
       });
 
       if (shouldSkipImage(buffer, imageUrl)) {
-        return "";
+        return [];
       }
 
-      buffer = await resizeImageIfTooLong(buffer, imageUrl);
+      const buffers = await splitImageIfTooLong(buffer, imageUrl);
+      const urls: string[] = [];
 
-      const pageNumber = pageUrls.length + 1;
-      const key = `${params.seriesSlug}/${params.chapter}/${pageNumber}.jpg`;
+      for (const partBuffer of buffers) {
+        const pageNumber = pageUrls.length + urls.length + 1;
+        const key = `${params.seriesSlug}/${params.chapter}/${pageNumber}.jpg`;
 
-      logger.info(
-        `Yükleniyor | Chapter ${params.chapter} | Page ${pageNumber} | ${key}`
-      );
+        logger.info(
+          `Yükleniyor | Chapter ${params.chapter} | Page ${pageNumber} | ${key}`
+        );
 
-      return uploadBufferToB2({
-        key,
-        buffer,
-        contentType: "image/jpeg",
-      });
+        const publicUrl = await uploadBufferToB2({
+          key,
+          buffer: partBuffer,
+          contentType: "image/jpeg",
+        });
+
+        urls.push(publicUrl);
+      }
+
+      return urls;
     });
 
-    if (!publicUrl) {
-      continue;
+    if (uploadedUrls.length > 0) {
+      pageUrls.push(...uploadedUrls);
     }
 
-    pageUrls.push(publicUrl);
-
-    await sleep(500);
+    await sleep(300);
   }
 
   return {
