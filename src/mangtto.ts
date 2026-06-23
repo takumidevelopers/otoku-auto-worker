@@ -1,7 +1,7 @@
 import { chromium, Page, Response } from "playwright";
 import { logger } from "./logger";
 
-const ENABLE_HALF_CHAPTERS = false;
+const ENABLE_HALF_CHAPTERS = true;
 
 const IMG_RE =
   /https?:\/\/[^\s"'\\]+?\.(?:jpg|jpeg|png|webp|avif|gif)(?:\?[^\s"'\\]*)?/gi;
