@@ -18,6 +18,13 @@ export type ImportJob = {
   is_adult?: string | number | boolean | null;
   page_start?: string | number | null;
   page_max?: string | number | null;
+
+  import_mode?: "create_series" | "append_existing" | string | null;
+  target_series_uid?: string | null;
+  target_series_name?: string | null;
+  target_start_chap?: string | number | null;
+  last_completed_chap?: string | number | null;
+  result_series_uid?: string | null;
 };
 
 function apiUrl(path: string): string {
@@ -89,8 +96,10 @@ export async function getNextImportJob(): Promise<ImportJob | null> {
 export async function updateImportJobStatus(params: {
   jobId: number;
   status: "pending" | "running" | "completed" | "failed";
-  seriesId?: string | null;
+  seriesId?: string | number | null;
   seriesName?: string | null;
+  resultSeriesUid?: string | null;
+  lastCompletedChap?: number | null;
   errorMessage?: string | null;
 }) {
   const form = new FormData();
@@ -98,9 +107,33 @@ export async function updateImportJobStatus(params: {
   form.append("job_id", String(params.jobId));
   form.append("status", params.status);
 
-  if (params.seriesId) form.append("series_id", params.seriesId);
-  if (params.seriesName) form.append("series_name", params.seriesName);
-  if (params.errorMessage) form.append("error_message", params.errorMessage);
+  if (params.seriesId !== undefined) {
+    form.append(
+      "series_id",
+      params.seriesId === null ? "" : String(params.seriesId)
+    );
+  }
+
+  if (params.seriesName !== undefined) {
+    form.append("series_name", params.seriesName ?? "");
+  }
+
+  if (params.resultSeriesUid !== undefined) {
+    form.append("result_series_uid", params.resultSeriesUid ?? "");
+  }
+
+  if (params.lastCompletedChap !== undefined) {
+    form.append(
+      "last_completed_chap",
+      params.lastCompletedChap === null
+        ? ""
+        : String(params.lastCompletedChap)
+    );
+  }
+
+  if (params.errorMessage !== undefined) {
+    form.append("error_message", params.errorMessage ?? "");
+  }
 
   const url = apiUrl("/worker/import_job_update.php");
 

@@ -285,6 +285,193 @@ function getSiyahMelekSeriesName(job: ImportJob): string {
   return nameFromForm;
 }
 
+// RESUME_APPEND_V5_HELPERS_START
+type ImportModeV5 = "create_series" | "append_existing";
+
+function importModeV5(job: ImportJob): ImportModeV5 {
+  return String((job as any).import_mode || "create_series")
+    .trim()
+    .toLowerCase() === "append_existing"
+    ? "append_existing"
+    : "create_series";
+}
+
+function optionalNumberV5(value: unknown): number | null {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function sourceStartV5(job: ImportJob): number {
+  const value = Number(job.start_chap);
+
+  if (!Number.isFinite(value)) {
+    throw new Error(`Geçersiz start_chap: ${job.start_chap}`);
+  }
+
+  return value;
+}
+
+function sourceEndV5(job: ImportJob): number {
+  const value = Number(job.end_chap);
+
+  if (!Number.isFinite(value)) {
+    throw new Error(`Geçersiz end_chap: ${job.end_chap}`);
+  }
+
+  return value;
+}
+
+function lastCompletedSourceV5(job: ImportJob): number | null {
+  return optionalNumberV5((job as any).last_completed_chap);
+}
+
+function targetStartV5(job: ImportJob): number {
+  if (importModeV5(job) === "create_series") {
+    return 1;
+  }
+
+  const value = optionalNumberV5((job as any).target_start_chap);
+
+  if (value === null || value < 0) {
+    throw new Error(
+      "append_existing işi için target_start_chap zorunlu ve sıfırdan büyük/eşit olmalı."
+    );
+  }
+
+  return value;
+}
+
+function targetChapterV5(job: ImportJob, sourceChapter: number): number {
+  const mapped =
+    targetStartV5(job) +
+    (sourceChapter - sourceStartV5(job));
+
+  return Number(mapped.toFixed(2));
+}
+
+function pendingChaptersV5<T extends { chapter: number }>(
+  chapters: T[],
+  job: ImportJob
+): T[] {
+  const lastCompleted = lastCompletedSourceV5(job);
+
+  return chapters
+    .filter(
+      (chapter) =>
+        lastCompleted === null ||
+        chapter.chapter > lastCompleted + 0.000001
+    )
+    .sort((a, b) => a.chapter - b.chapter);
+}
+
+function appendTargetV5(job: ImportJob): {
+  seriesUid: string;
+  seriesName: string;
+} {
+  const seriesUid = String((job as any).target_series_uid || "").trim();
+  const seriesName = String(
+    (job as any).target_series_name ||
+    job.series_name ||
+    ""
+  ).trim();
+
+  if (!seriesUid) {
+    throw new Error(
+      "append_existing işi için target_series_uid zorunlu."
+    );
+  }
+
+  if (!seriesName) {
+    throw new Error(
+      "append_existing işi için target_series_name zorunlu."
+    );
+  }
+
+  return {
+    seriesUid,
+    seriesName,
+  };
+}
+
+function existingResultSeriesUidV5(job: ImportJob): string | null {
+  const value = String((job as any).result_series_uid || "").trim();
+  return value || null;
+}
+
+async function saveProgressV5(params: {
+  job: ImportJob;
+  sourceChapter: number;
+  seriesName: string;
+  seriesDbId?: number | null;
+  resultSeriesUid: string;
+}): Promise<void> {
+  await updateImportJobStatus({
+    jobId: params.job.id,
+    status: "running",
+    seriesId:
+      params.seriesDbId === undefined
+        ? undefined
+        : params.seriesDbId,
+    seriesName: params.seriesName,
+    resultSeriesUid: params.resultSeriesUid,
+    lastCompletedChap: params.sourceChapter,
+    errorMessage: "",
+  });
+}
+
+async function completeJobV5(params: {
+  job: ImportJob;
+  lastSourceChapter: number;
+  seriesName: string;
+  seriesDbId?: number | null;
+  resultSeriesUid: string;
+}): Promise<void> {
+  const requestedEnd = sourceEndV5(params.job);
+
+  if (params.lastSourceChapter + 0.000001 < requestedEnd) {
+    throw new Error(
+      `Kısmi import durduruldu. Son tamamlanan kaynak bölüm: ${formatChapterNumber(
+        params.lastSourceChapter
+      )} | İstenen son bölüm: ${formatChapterNumber(requestedEnd)}. ` +
+      "Job completed yapılmadı; last_completed_chap kaydedildi."
+    );
+  }
+
+  await updateImportJobStatus({
+    jobId: params.job.id,
+    status: "completed",
+    seriesId:
+      params.seriesDbId === undefined
+        ? undefined
+        : params.seriesDbId,
+    seriesName: params.seriesName,
+    resultSeriesUid: params.resultSeriesUid,
+    lastCompletedChap: params.lastSourceChapter,
+    errorMessage: "",
+  });
+}
+
+function scanStartForIntegerSourceV5(job: ImportJob): number {
+  const lastCompleted = lastCompletedSourceV5(job);
+
+  return lastCompleted === null
+    ? sourceStartV5(job)
+    : Math.max(sourceStartV5(job), Math.floor(lastCompleted) + 1);
+}
+
+function scanStartForFlexibleSourceV5(job: ImportJob): number {
+  const lastCompleted = lastCompletedSourceV5(job);
+
+  return lastCompleted === null
+    ? sourceStartV5(job)
+    : Math.max(sourceStartV5(job), lastCompleted);
+}
+// RESUME_APPEND_V5_HELPERS_END
+
 async function runSiyahMelekApiJob(job: ImportJob): Promise<number> {
   const externalSeriesId = String(job.external_series_id || "").trim();
 
@@ -292,92 +479,158 @@ async function runSiyahMelekApiJob(job: ImportJob): Promise<number> {
     throw new Error("SiyahMelek API job için external_series_id boş olamaz.");
   }
 
-  const seriesName = getSiyahMelekSeriesName(job);
+  const sourceSeriesName = getSiyahMelekSeriesName(job);
+  const mode = importModeV5(job);
+  const scanStart = scanStartForIntegerSourceV5(job);
+  const endChap = sourceEndV5(job);
 
-  const baseSlug = slugify(seriesName);
-  let seriesSlug = baseSlug || `siyahmelek-${externalSeriesId}`;
-
-  seriesSlug = await getAvailableSeriesSlug(seriesSlug);
-
-  logger.info(
-    `SiyahMelek seri slug seçildi | Form Seri Adı: ${seriesName} | Slug: ${seriesSlug}`
+  const chapters = pendingChaptersV5(
+    await scanSiyahMelekApiChapters({
+      externalSeriesId,
+      startChap: scanStart,
+      endChap,
+      storageType: normalizeStorageType(job.storage_type),
+      pageStart: Number(job.page_start || 1),
+      pageMax: Number(job.page_max || 160),
+      missingLimit: 5,
+    }),
+    job
   );
 
-  const chapters = await scanSiyahMelekApiChapters({
-    externalSeriesId,
-    startChap: Number(job.start_chap),
-    endChap: Number(job.end_chap),
-    storageType: normalizeStorageType(job.storage_type),
-    pageStart: Number(job.page_start || 1),
-    pageMax: Number(job.page_max || 160),
-    missingLimit: 5,
-  });
+  const alreadyCompleted = lastCompletedSourceV5(job);
 
   if (chapters.length === 0) {
-    throw new Error("SiyahMelek API üzerinden hiç bölüm bulunamadı.");
+    if (alreadyCompleted !== null && alreadyCompleted >= endChap) {
+      const target =
+        mode === "append_existing"
+          ? appendTargetV5(job)
+          : {
+              seriesUid:
+                existingResultSeriesUidV5(job) ||
+                slugify(sourceSeriesName),
+              seriesName: sourceSeriesName,
+            };
+
+      await completeJobV5({
+        job,
+        lastSourceChapter: alreadyCompleted,
+        seriesName: target.seriesName,
+        resultSeriesUid: target.seriesUid,
+      });
+
+      return 0;
+    }
+
+    throw new Error(
+      `SiyahMelek API ${formatChapterNumber(scanStart)}-${formatChapterNumber(
+        endChap
+      )} aralığında devam edilecek bölüm bulamadı.`
+    );
   }
 
-  const series = await upsertSeries({
-    name: seriesName,
-    seriesuid: seriesSlug,
-    coverImageUrl: "",
-    des: "Henüz açıklama eklenmedi.",
-    kaynak: "SiyahMelek",
-    final: "Devam Ediyor",
-    searchName: seriesName,
-  });
+  let seriesUid: string;
+  let seriesName: string;
+  let seriesDbId: number | null = null;
 
-  logger.info(
-    `SiyahMelek seri oluşturuldu/güncellendi | ID: ${series.series_id} | UID: ${series.seriesuid} | Name: ${seriesName}`
-  );
+  if (mode === "append_existing") {
+    const target = appendTargetV5(job);
+    seriesUid = target.seriesUid;
+    seriesName = target.seriesName;
 
-  await applyCategories({
-    seriesId: series.seriesuid,
-    genres: [],
-    forceAdult: true,
-  });
+    logger.info(
+      `SiyahMelek append_existing | Target UID: ${seriesUid} | Target Name: ${seriesName}`
+    );
+  } else {
+    seriesName = sourceSeriesName;
 
-  let displayChapterNumber = 1;
+    const baseSlug =
+      slugify(seriesName) ||
+      `siyahmelek-${externalSeriesId}`;
+
+    seriesUid =
+      existingResultSeriesUidV5(job) ||
+      (await getAvailableSeriesSlug(baseSlug));
+
+    const series = await upsertSeries({
+      name: seriesName,
+      seriesuid: seriesUid,
+      coverImageUrl: "",
+      des: "Henüz açıklama eklenmedi.",
+      kaynak: "SiyahMelek",
+      final: "Devam Ediyor",
+      searchName: seriesName,
+    });
+
+    seriesUid = series.seriesuid;
+    seriesDbId = series.series_id;
+
+    await applyCategories({
+      seriesId: seriesUid,
+      genres: [],
+      forceAdult: true,
+    });
+  }
+
+  let importedChapterCount = 0;
+  let lastSourceChapter =
+    alreadyCompleted ?? sourceStartV5(job) - 1;
 
   for (const chapter of chapters) {
+    const targetChapter = targetChapterV5(job, chapter.chapter);
+
     const uploadResult = await uploadChapterImages({
-      seriesSlug: series.seriesuid,
-      chapter: displayChapterNumber,
+      seriesSlug: seriesUid,
+      chapter: targetChapter,
       imageUrls: chapter.imageUrls,
       source: "siyahmelek_api",
     });
 
-    logger.info(
-      `SiyahMelek bölüm yüklendi | Kaynak Chapter: ${chapter.chapter} | Otoku Chapter: ${displayChapterNumber} | Page Count: ${uploadResult.pageCount}`
-    );
+    if (uploadResult.pageCount === 0) {
+      throw new Error(
+        `SiyahMelek kaynak bölüm ${formatChapterNumber(
+          chapter.chapter
+        )} için yüklenebilir sayfa kalmadı.`
+      );
+    }
 
-    const eps = String(displayChapterNumber);
-    const epsuid = `${series.seriesuid}-${displayChapterNumber}`;
+    const eps = formatChapterNumber(targetChapter);
+    const epsuid = `${seriesUid}-${eps.replace(/\./g, "-")}`;
 
     await upsertChapter({
       eps,
       epsuid,
-      seriesId: series.seriesuid,
+      seriesId: seriesUid,
       chapterurl: uploadResult.baseUrl,
     });
 
-    logger.info(
-      `SiyahMelek bölüm DB kaydı tamamlandı | Kaynak Chapter: ${chapter.chapter} | Otoku Chapter: ${displayChapterNumber}`
-    );
+    lastSourceChapter = chapter.chapter;
+    importedChapterCount++;
 
-    displayChapterNumber++;
+    await saveProgressV5({
+      job,
+      sourceChapter: lastSourceChapter,
+      seriesName,
+      seriesDbId,
+      resultSeriesUid: seriesUid,
+    });
+
+    logger.info(
+      `SiyahMelek bölüm tamamlandı | Kaynak: ${formatChapterNumber(
+        chapter.chapter
+      )} | Hedef: ${eps} | Pages: ${uploadResult.pageCount}`
+    );
   }
 
-  await updateImportJobStatus({
-    jobId: job.id,
-    status: "completed",
-    seriesId: series.seriesuid,
+  await completeJobV5({
+    job,
+    lastSourceChapter,
     seriesName,
+    seriesDbId,
+    resultSeriesUid: seriesUid,
   });
 
   logger.info(`SiyahMelek API job tamamlandı: #${job.id}`);
-
-  return displayChapterNumber - 1;
+  return importedChapterCount;
 }
 
 async function runNiveraJob(job: ImportJob): Promise<number> {
@@ -512,115 +765,185 @@ async function runNiveraJob(job: ImportJob): Promise<number> {
 }
 
 async function runMangttoJob(job: ImportJob): Promise<number> {
-  logger.info(`Kaynak URL: ${job.source_url}`);
+  const mode = importModeV5(job);
+  const baseSeriesSlug =
+    extractSlugFromMangttoUrl(job.source_url);
+  const fallbackTitle =
+    titleFromSlug(baseSeriesSlug);
+  const scanStart =
+    scanStartForFlexibleSourceV5(job);
+  const endChap =
+    sourceEndV5(job);
 
-  const baseSeriesSlug = extractSlugFromMangttoUrl(job.source_url);
-  let seriesSlug = baseSeriesSlug;
-  const fallbackTitle = titleFromSlug(baseSeriesSlug);
-
-  if (!FORCE_EXISTING_SERIES_MODE) {
-    seriesSlug = await getAvailableSeriesSlug(baseSeriesSlug);
-  }
-
-  logger.info(
-    `Series slug seçildi | Base: ${baseSeriesSlug} | Kullanılan: ${seriesSlug} | ExistingMode: ${FORCE_EXISTING_SERIES_MODE}`
+  const chapters = pendingChaptersV5(
+    dedupeChapters(
+      await scanMangttoChapters({
+        sourceUrl: job.source_url,
+        startChap: scanStart,
+        endChap,
+        missLimit: 5,
+      })
+    ),
+    job
   );
 
-  logger.info(`AniList metadata aranıyor: ${fallbackTitle}`);
-  const metadata = await searchAniListByTitle(fallbackTitle);
-
-  logger.info("Bölümler taranıyor...");
-  const scannedChapters = await scanMangttoChapters({
-    sourceUrl: job.source_url,
-    startChap: Number(job.start_chap),
-    endChap: Number(job.end_chap),
-    missLimit: 5,
-  });
-
-  const chapters = dedupeChapters(scannedChapters);
-
-  logger.info(
-    `Toplam bulunan bölüm: ${scannedChapters.length} | Duplicate sonrası: ${chapters.length}`
-  );
+  const alreadyCompleted = lastCompletedSourceV5(job);
 
   if (chapters.length === 0) {
+    if (
+      alreadyCompleted !== null &&
+      alreadyCompleted >= endChap
+    ) {
+      const target =
+        mode === "append_existing"
+          ? appendTargetV5(job)
+          : {
+              seriesUid:
+                existingResultSeriesUidV5(job) ||
+                baseSeriesSlug,
+              seriesName:
+                job.series_name || fallbackTitle,
+            };
+
+      await completeJobV5({
+        job,
+        lastSourceChapter: alreadyCompleted,
+        seriesName: target.seriesName,
+        resultSeriesUid: target.seriesUid,
+      });
+
+      return 0;
+    }
+
     throw new Error(
-      "Hiç bölüm bulunamadı. Seri DB'ye eklenmedi. Kaynak URL, bölüm aralığı veya scraper filtresi kontrol edilmeli."
+      `Mangtto ${formatChapterNumber(
+        scanStart
+      )}-${formatChapterNumber(
+        endChap
+      )} aralığında devam edilecek bölüm bulamadı.`
     );
   }
 
-  const seriesName = metadata?.titleRomaji || fallbackTitle;
+  let seriesUid: string;
+  let seriesName: string;
+  let seriesDbId: number | null = null;
 
-  const searchName = buildSearchName({
-    titleRomaji: metadata?.titleRomaji,
-    titleEnglish: metadata?.titleEnglish,
-    titleNative: metadata?.titleNative,
-    synonyms: metadata?.synonyms || [],
-    fallbackTitle,
-  });
+  if (mode === "append_existing") {
+    const target = appendTargetV5(job);
+    seriesUid = target.seriesUid;
+    seriesName = target.seriesName;
 
-  const series = await upsertSeries({
-    name: seriesName,
-    seriesuid: seriesSlug,
-    coverImageUrl: metadata?.coverImage || "",
-    des: "Açıklama henüz eklenmemiş görünüyor...",
-    kaynak: "",
-    final: mapAniListStatus(metadata?.status || null),
-    searchName,
-  });
+    logger.info(
+      `Mangtto append_existing | Target UID: ${seriesUid} | Target Name: ${seriesName}`
+    );
+  } else {
+    logger.info(
+      `AniList metadata aranıyor: ${fallbackTitle}`
+    );
 
-  logger.info(
-    `Seri oluşturuldu/güncellendi | ID: ${series.series_id} | UID: ${series.seriesuid}`
-  );
+    const metadata =
+      await searchAniListByTitle(fallbackTitle);
 
-  await applyCategories({
-    seriesId: series.seriesuid,
-    genres: metadata?.genres || [],
-  });
+    seriesName =
+      metadata?.titleRomaji || fallbackTitle;
 
-  let displayChapterNumber = 1;
+    seriesUid =
+      existingResultSeriesUidV5(job) ||
+      (FORCE_EXISTING_SERIES_MODE
+        ? baseSeriesSlug
+        : await getAvailableSeriesSlug(baseSeriesSlug));
+
+    const searchName = buildSearchName({
+      titleRomaji: metadata?.titleRomaji,
+      titleEnglish: metadata?.titleEnglish,
+      titleNative: metadata?.titleNative,
+      synonyms: metadata?.synonyms || [],
+      fallbackTitle,
+    });
+
+    const series = await upsertSeries({
+      name: seriesName,
+      seriesuid: seriesUid,
+      coverImageUrl: metadata?.coverImage || "",
+      des: "Açıklama henüz eklenmemiş görünüyor...",
+      kaynak: "",
+      final: mapAniListStatus(
+        metadata?.status || null
+      ),
+      searchName,
+    });
+
+    seriesUid = series.seriesuid;
+    seriesDbId = series.series_id;
+
+    await applyCategories({
+      seriesId: seriesUid,
+      genres: metadata?.genres || [],
+    });
+  }
+
+  let importedChapterCount = 0;
+  let lastSourceChapter =
+    alreadyCompleted ?? sourceStartV5(job) - 1;
 
   for (const chapter of chapters) {
+    const targetChapter =
+      targetChapterV5(job, chapter.chapter);
+
     const uploadResult = await uploadChapterImages({
-      seriesSlug: series.seriesuid,
-      chapter: displayChapterNumber,
+      seriesSlug: seriesUid,
+      chapter: targetChapter,
       imageUrls: chapter.imageUrls,
       source: "mangtto",
     });
 
-    logger.info(
-      `Bölüm yüklendi | Kaynak Chapter: ${chapter.chapter} | Otoku Chapter: ${displayChapterNumber} | Page Count: ${uploadResult.pageCount}`
-    );
+    if (uploadResult.pageCount === 0) {
+      throw new Error(
+        `Mangtto kaynak bölüm ${formatChapterNumber(
+          chapter.chapter
+        )} için yüklenebilir sayfa kalmadı.`
+      );
+    }
 
-    logger.info(`Chapter Base URL: ${uploadResult.baseUrl}`);
-
-    const eps = String(displayChapterNumber);
-    const epsuid = `${series.seriesuid}-${displayChapterNumber}`;
+    const eps = formatChapterNumber(targetChapter);
+    const epsuid =
+      `${seriesUid}-${eps.replace(/\./g, "-")}`;
 
     await upsertChapter({
       eps,
       epsuid,
-      seriesId: series.seriesuid,
+      seriesId: seriesUid,
       chapterurl: uploadResult.baseUrl,
     });
 
-    logger.info(
-      `Bölüm DB kaydı tamamlandı | Kaynak Chapter: ${chapter.chapter} | Otoku Chapter: ${displayChapterNumber} | SeriesUID: ${series.seriesuid}`
-    );
+    lastSourceChapter = chapter.chapter;
+    importedChapterCount++;
 
-    displayChapterNumber++;
+    await saveProgressV5({
+      job,
+      sourceChapter: lastSourceChapter,
+      seriesName,
+      seriesDbId,
+      resultSeriesUid: seriesUid,
+    });
+
+    logger.info(
+      `Mangtto bölüm tamamlandı | Kaynak: ${formatChapterNumber(
+        chapter.chapter
+      )} | Hedef: ${eps} | Pages: ${uploadResult.pageCount}`
+    );
   }
 
-  await updateImportJobStatus({
-    jobId: job.id,
-    status: "completed",
-    seriesId: series.seriesuid,
+  await completeJobV5({
+    job,
+    lastSourceChapter,
     seriesName,
+    seriesDbId,
+    resultSeriesUid: seriesUid,
   });
 
   logger.info(`Mangtto job tamamlandı: #${job.id}`);
-
-  return displayChapterNumber - 1;
+  return importedChapterCount;
 }
 
 // NIVERA_CDN_V4_1_START
@@ -698,112 +1021,205 @@ async function applyNiveraCategoriesV410(seriesId: string): Promise<void> {
 
 async function runNiveraCdnJobV410(job: ImportJob): Promise<number> {
   const requestedSeriesName = getNiveraCdnSeriesNameV410(job);
-  const baseSeriesSlug = slugify(requestedSeriesName) || "nivera-series";
-  const existingSeriesId = String((job as any).series_id || "").trim();
-  const seriesSlug = existingSeriesId || (await getAvailableSeriesSlug(baseSeriesSlug));
+  const mode = importModeV5(job);
+  const scanStart = scanStartForFlexibleSourceV5(job);
+  const endChap = sourceEndV5(job);
 
-  logger.info(
-    `Nivera CDN series slug | Name: ${requestedSeriesName} | Slug: ${seriesSlug} | Existing: ${Boolean(existingSeriesId)}`
+  const chapters = pendingChaptersV5(
+    await scanNiveraCdnChapters({
+      sourceUrl: String(job.source_url || ""),
+      sourceName: requestedSeriesName,
+      startChap: scanStart,
+      endChap,
+      maxGroups: 40,
+      pageMax: Number((job as any).page_max || 300),
+      groupMissLimit: 3,
+      pageMissLimit: 3,
+    }),
+    job
   );
 
-  const chapters = await scanNiveraCdnChapters({
-    sourceUrl: String(job.source_url || ""),
-    sourceName: requestedSeriesName,
-    startChap: Number(job.start_chap),
-    endChap: Number(job.end_chap),
-    maxGroups: 40,
-    pageMax: Number((job as any).page_max || 300),
-    groupMissLimit: 3,
-    pageMissLimit: 3,
-  });
+  const alreadyCompleted = lastCompletedSourceV5(job);
 
   if (chapters.length === 0) {
-    throw new Error("Nivera CDN üzerinde bölüm görseli bulunamadı.");
-  }
+    if (alreadyCompleted !== null && alreadyCompleted >= endChap) {
+      const target =
+        mode === "append_existing"
+          ? appendTargetV5(job)
+          : {
+              seriesUid:
+                existingResultSeriesUidV5(job) ||
+                slugify(requestedSeriesName),
+              seriesName: requestedSeriesName,
+            };
 
-  let metadata: Awaited<ReturnType<typeof searchAniListByTitle>> = null;
+      await completeJobV5({
+        job,
+        lastSourceChapter: alreadyCompleted,
+        seriesName: target.seriesName,
+        resultSeriesUid: target.seriesUid,
+      });
 
-  try {
-    logger.info(`Nivera AniList güvenli arama | ${requestedSeriesName}`);
-    const candidate = await searchAniListByTitle(requestedSeriesName);
-
-    if (candidate && isSafeNiveraAniListMatchV410(requestedSeriesName, candidate)) {
-      metadata = candidate;
-      logger.info(
-        `Nivera AniList eşleşmesi kabul edildi | Requested: ${requestedSeriesName} | Romaji: ${candidate.titleRomaji}`
-      );
-    } else if (candidate) {
-      logger.warn(
-        `Nivera AniList eşleşmesi reddedildi | Requested: ${requestedSeriesName} | Romaji: ${candidate.titleRomaji} | English: ${candidate.titleEnglish || "YOK"} | Genres: ${(candidate.genres || []).join(", ") || "YOK"}`
-      );
+      return 0;
     }
-  } catch (error) {
-    logger.warn(
-      `Nivera AniList isteği başarısız; metadata olmadan devam ediliyor | ${error instanceof Error ? error.message : String(error)}`
+
+    throw new Error(
+      `Nivera CDN ${formatChapterNumber(scanStart)}-${formatChapterNumber(
+        endChap
+      )} aralığında devam edilecek bölüm bulamadı.`
     );
   }
 
-  const seriesName = requestedSeriesName;
-  const searchName = buildSearchName({
-    titleRomaji: metadata?.titleRomaji,
-    titleEnglish: metadata?.titleEnglish,
-    titleNative: metadata?.titleNative,
-    synonyms: metadata?.synonyms || [],
-    fallbackTitle: requestedSeriesName,
-  });
+  let seriesUid: string;
+  let seriesName: string;
+  let seriesDbId: number | null = null;
 
-  const series = await upsertSeries({
-    name: seriesName,
-    seriesuid: seriesSlug,
-    coverImageUrl: metadata?.coverImage || "",
-    des: metadata?.description || "",
-    kaynak: "Nivera",
-    final: metadata ? mapAniListStatus(metadata.status || null) : "Devam Ediyor",
-    searchName,
-  });
+  if (mode === "append_existing") {
+    const target = appendTargetV5(job);
+    seriesUid = target.seriesUid;
+    seriesName = target.seriesName;
 
-  logger.info(
-    `Nivera series upsert completed | ID: ${series.series_id} | UID: ${series.seriesuid} | Metadata: ${metadata ? "accepted" : "skipped"}`
-  );
+    logger.info(
+      `Nivera append_existing | Target UID: ${seriesUid} | Target Name: ${seriesName}`
+    );
+  } else {
+    let metadata: Awaited<
+      ReturnType<typeof searchAniListByTitle>
+    > = null;
 
-  await applyNiveraCategoriesV410(series.seriesuid);
+    try {
+      logger.info(
+        `Nivera AniList güvenli arama | ${requestedSeriesName}`
+      );
 
-  let displayChapterNumber = 1;
+      const candidate =
+        await searchAniListByTitle(requestedSeriesName);
+
+      if (
+        candidate &&
+        isSafeNiveraAniListMatchV410(
+          requestedSeriesName,
+          candidate
+        )
+      ) {
+        metadata = candidate;
+
+        logger.info(
+          `Nivera AniList eşleşmesi kabul edildi | Requested: ${requestedSeriesName} | Romaji: ${candidate.titleRomaji}`
+        );
+      } else if (candidate) {
+        logger.warn(
+          `Nivera AniList eşleşmesi reddedildi | Requested: ${requestedSeriesName} | Romaji: ${candidate.titleRomaji} | English: ${candidate.titleEnglish || "YOK"} | Genres: ${(candidate.genres || []).join(", ") || "YOK"}`
+        );
+      }
+    } catch (error) {
+      logger.warn(
+        `Nivera AniList isteği başarısız; metadata olmadan devam ediliyor | ${
+          error instanceof Error
+            ? error.message
+            : String(error)
+        }`
+      );
+    }
+
+    seriesName = requestedSeriesName;
+
+    const baseSeriesSlug =
+      slugify(requestedSeriesName) ||
+      "nivera-series";
+
+    seriesUid =
+      existingResultSeriesUidV5(job) ||
+      (await getAvailableSeriesSlug(baseSeriesSlug));
+
+    const searchName = buildSearchName({
+      titleRomaji: metadata?.titleRomaji,
+      titleEnglish: metadata?.titleEnglish,
+      titleNative: metadata?.titleNative,
+      synonyms: metadata?.synonyms || [],
+      fallbackTitle: requestedSeriesName,
+    });
+
+    const series = await upsertSeries({
+      name: seriesName,
+      seriesuid: seriesUid,
+      coverImageUrl: metadata?.coverImage || "",
+      des: metadata?.description || "",
+      kaynak: "Nivera",
+      final: metadata
+        ? mapAniListStatus(metadata.status || null)
+        : "Devam Ediyor",
+      searchName,
+    });
+
+    seriesUid = series.seriesuid;
+    seriesDbId = series.series_id;
+
+    await applyNiveraCategoriesV410(seriesUid);
+  }
+
+  let importedChapterCount = 0;
+  let lastSourceChapter =
+    alreadyCompleted ?? sourceStartV5(job) - 1;
 
   for (const chapter of chapters) {
+    const targetChapter =
+      targetChapterV5(job, chapter.chapter);
+
     const uploadResult = await uploadChapterImages({
-      seriesSlug: series.seriesuid,
-      chapter: displayChapterNumber,
+      seriesSlug: seriesUid,
+      chapter: targetChapter,
       imageUrls: chapter.imageUrls,
       source: "nivera_cdn",
     });
 
-    logger.info(
-      `Nivera chapter uploaded | Source: ${chapter.chapter} | Otoku: ${displayChapterNumber} | Pages: ${uploadResult.pageCount}`
-    );
+    if (uploadResult.pageCount === 0) {
+      throw new Error(
+        `Nivera kaynak bölüm ${formatChapterNumber(
+          chapter.chapter
+        )} için yüklenebilir sayfa kalmadı.`
+      );
+    }
 
-    const eps = String(displayChapterNumber);
-    const epsuid = `${series.seriesuid}-${displayChapterNumber}`;
+    const eps = formatChapterNumber(targetChapter);
+    const epsuid =
+      `${seriesUid}-${eps.replace(/\./g, "-")}`;
 
     await upsertChapter({
       eps,
       epsuid,
-      seriesId: series.seriesuid,
+      seriesId: seriesUid,
       chapterurl: uploadResult.baseUrl,
     });
 
-    displayChapterNumber++;
+    lastSourceChapter = chapter.chapter;
+    importedChapterCount++;
+
+    await saveProgressV5({
+      job,
+      sourceChapter: lastSourceChapter,
+      seriesName,
+      seriesDbId,
+      resultSeriesUid: seriesUid,
+    });
+
+    logger.info(
+      `Nivera bölüm tamamlandı | Kaynak: ${formatChapterNumber(
+        chapter.chapter
+      )} | Hedef: ${eps} | Pages: ${uploadResult.pageCount}`
+    );
   }
 
-  await updateImportJobStatus({
-    jobId: job.id,
-    status: "completed",
-    seriesId: series.seriesuid,
+  await completeJobV5({
+    job,
+    lastSourceChapter,
     seriesName,
+    seriesDbId,
+    resultSeriesUid: seriesUid,
   });
 
   logger.info(`Nivera CDN job completed: #${job.id}`);
-  return displayChapterNumber - 1;
+  return importedChapterCount;
 }
 // NIVERA_CDN_V4_1_END
 
