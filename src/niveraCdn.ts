@@ -330,11 +330,16 @@ async function findChapterPageVariantV430(params: {
     )
   );
 }
+// NIVERA_THIRD_ROOT_V4_5_1
 function buildNiveraSeriesRootsV430(
   primaryRoot: string
 ): string[] {
   const roots = [
     primaryRoot,
+    primaryRoot.replace(
+      "/nivera/data/",
+      "/nivera/data2/"
+    ),
     primaryRoot.replace(
       "/nivera/data/",
       "/nivera/data2/data/"
@@ -559,7 +564,7 @@ export async function scanNiveraCdnChapters(params: {
 
     if (imageUrls.length === 0) {
       throw new Error(
-        `Nivera CDN bölüm görselleri iki kökte de bulunamadı. Chapter: ${item.chapter} | Folder: ${item.chapterSlug} | Roots: /nivera/data/ ve /nivera/data2/data/`
+        `Nivera CDN bölüm görselleri üç kökte de bulunamadı. Chapter: ${item.chapter} | Folder: ${item.chapterSlug} | Roots: /nivera/data/, /nivera/data2/ ve /nivera/data2/data/`
       );
     }
 
