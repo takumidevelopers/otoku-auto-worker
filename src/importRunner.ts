@@ -1,3 +1,4 @@
+import { scanNiveraCdnChapters } from "./niveraCdn";
 import { logger } from "./logger";
 import {
   ImportJob,
@@ -15,6 +16,10 @@ import {
   scanSiyahMelekApiChapters,
   SiyahMelekStorageType,
 } from "./siyahmelekApi";
+import {
+  extractNiveraSeriesSlug,
+  scanNiveraChapters,
+} from "./nivera";
 
 const FORCE_EXISTING_SERIES_MODE = true;
 
@@ -230,7 +235,44 @@ function normalizeStorageType(value: unknown): SiyahMelekStorageType {
 }
 
 function normalizeSource(job: ImportJob): string {
+  const sourceUrl = String(job.source_url || "").trim().toLowerCase();
+
+  // Admin paneli değiştirmeden Nivera URL'sini otomatik algılar.
+  if (
+    sourceUrl.includes("niverafansub.one/") ||
+    sourceUrl.includes("niverafansub.net/")
+  ) {
+    return "nivera";
+  }
+
   return String(job.source || "mangtto").trim().toLowerCase();
+}
+
+function isTruthy(value: unknown): boolean {
+  const clean = String(value ?? "").trim().toLowerCase();
+  return ["1", "true", "yes", "evet", "on"].includes(clean);
+}
+
+function getOptionalSourceName(job: ImportJob): string | null {
+  const name = String(job.source_name || "").trim();
+  const genericNames = new Set([
+    "mangtto",
+    "nivera",
+    "nivera_fansub",
+    "nivera fansub",
+  ]);
+
+  if (!name || genericNames.has(name.toLowerCase())) {
+    return null;
+  }
+
+  return name;
+}
+
+function formatChapterNumber(chapter: number): string {
+  return Number.isInteger(chapter)
+    ? String(chapter)
+    : String(chapter).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function getSiyahMelekSeriesName(job: ImportJob): string {
@@ -336,6 +378,137 @@ async function runSiyahMelekApiJob(job: ImportJob): Promise<number> {
   logger.info(`SiyahMelek API job tamamlandı: #${job.id}`);
 
   return displayChapterNumber - 1;
+}
+
+async function runNiveraJob(job: ImportJob): Promise<number> {
+  const sourceUrl = String(job.source_url || "").trim();
+
+  if (!sourceUrl) {
+    throw new Error("Nivera job için source_url boş olamaz.");
+  }
+
+  const startChap = Number(job.start_chap);
+  const endChap = Number(job.end_chap);
+
+  logger.info(
+    `Nivera job başladı | URL: ${sourceUrl} | Range: ${startChap}-${endChap}`
+  );
+
+  const scan = await scanNiveraChapters({
+    sourceUrl,
+    startChap,
+    endChap,
+    externalSeriesId:
+      String(job.external_series_id || "").trim() || undefined,
+    sourceName: getOptionalSourceName(job) || undefined,
+  });
+
+  if (scan.chapters.length === 0) {
+    throw new Error("Nivera üzerinden hiç bölüm/görsel bulunamadı.");
+  }
+
+  const baseSeriesSlug = extractNiveraSeriesSlug(sourceUrl);
+  const requestedSeriesId = String(job.series_id || "").trim();
+  let seriesSlug = requestedSeriesId || baseSeriesSlug;
+
+  if (!requestedSeriesId && !FORCE_EXISTING_SERIES_MODE) {
+    seriesSlug = await getAvailableSeriesSlug(baseSeriesSlug);
+  }
+
+  const fallbackTitle = scan.seriesTitle || titleFromSlug(baseSeriesSlug);
+  const sourceNameOverride = getOptionalSourceName(job);
+  const metadataSearchTitle = sourceNameOverride || fallbackTitle;
+
+  logger.info(`Nivera AniList metadata aranıyor: ${metadataSearchTitle}`);
+  const metadata = await searchAniListByTitle(metadataSearchTitle);
+
+  const seriesName =
+    sourceNameOverride ||
+    metadata?.titleRomaji ||
+    fallbackTitle;
+
+  const searchName = buildSearchName({
+    titleRomaji: metadata?.titleRomaji,
+    titleEnglish: metadata?.titleEnglish,
+    titleNative: metadata?.titleNative,
+    synonyms: metadata?.synonyms || [],
+    fallbackTitle,
+  });
+
+  const series = await upsertSeries({
+    name: seriesName,
+    seriesuid: seriesSlug,
+    coverImageUrl: metadata?.coverImage || scan.coverImageUrl || "",
+    des: scan.description || "Açıklama henüz eklenmemiş görünüyor...",
+    kaynak: "Nivera Fansub",
+    final: mapAniListStatus(metadata?.status || null),
+    searchName,
+  });
+
+  logger.info(
+    `Nivera seri oluşturuldu/güncellendi | ID: ${series.series_id} | UID: ${series.seriesuid} | Name: ${seriesName}`
+  );
+
+  await applyCategories({
+    seriesId: series.seriesuid,
+    genres: metadata?.genres || [],
+    forceAdult: isTruthy(job.is_adult),
+  });
+
+  let importedChapterCount = 0;
+
+  for (const chapter of scan.chapters) {
+    const chapterNumber = chapter.chapter;
+    const eps = formatChapterNumber(chapterNumber);
+
+    const uploadResult = await uploadChapterImages({
+      seriesSlug: series.seriesuid,
+      chapter: chapterNumber,
+      imageUrls: chapter.imageUrls,
+      source: "nivera",
+    });
+
+    if (uploadResult.pageCount === 0) {
+      logger.warn(
+        `Nivera bölüm DB kaydı atlandı; yüklenebilir görsel kalmadı | Chapter: ${eps}`
+      );
+      continue;
+    }
+
+    const epsuid = `${series.seriesuid}-${eps.replace(/\./g, "-")}`;
+
+    await upsertChapter({
+      eps,
+      epsuid,
+      seriesId: series.seriesuid,
+      chapterurl: uploadResult.baseUrl,
+    });
+
+    importedChapterCount++;
+
+    logger.info(
+      `Nivera bölüm tamamlandı | Chapter: ${eps} | Page Count: ${uploadResult.pageCount} | SeriesUID: ${series.seriesuid}`
+    );
+  }
+
+  if (importedChapterCount === 0) {
+    throw new Error(
+      "Nivera bölümleri tarandı ancak filtrelerden sonra hiçbir bölüm yüklenemedi."
+    );
+  }
+
+  await updateImportJobStatus({
+    jobId: job.id,
+    status: "completed",
+    seriesId: series.seriesuid,
+    seriesName,
+  });
+
+  logger.info(
+    `Nivera job tamamlandı: #${job.id} | Chapter Count: ${importedChapterCount}`
+  );
+
+  return importedChapterCount;
 }
 
 async function runMangttoJob(job: ImportJob): Promise<number> {
@@ -450,6 +623,121 @@ async function runMangttoJob(job: ImportJob): Promise<number> {
   return displayChapterNumber - 1;
 }
 
+// NIVERA_CDN_V4_0_2_START
+function getNiveraCdnSeriesNameV402(job: ImportJob): string {
+  const anyJob = job as any;
+  const formName = String(anyJob.source_name || anyJob.series_name || "").trim();
+
+  if (formName && formName !== "nivera" && formName !== "nivera_cdn") {
+    return formName;
+  }
+
+  const fileMatch = String(job.source_url || "").match(
+    /\/0-([^/?#]+?)\.(?:jpe?g|png|webp)(?:[?#].*)?$/i
+  );
+
+  if (fileMatch?.[1]) {
+    return titleFromSlug(fileMatch[1]);
+  }
+
+  throw new Error(
+    "Nivera CDN job requires source_name, or source_url must point to a 0-series-slug.jpg file."
+  );
+}
+
+async function runNiveraCdnJobV402(job: ImportJob): Promise<number> {
+  const requestedSeriesName = getNiveraCdnSeriesNameV402(job);
+  const baseSeriesSlug = slugify(requestedSeriesName);
+  const seriesSlug = await getAvailableSeriesSlug(baseSeriesSlug || "nivera-series");
+
+  logger.info(
+    `Nivera CDN series slug | Name: ${requestedSeriesName} | Slug: ${seriesSlug}`
+  );
+
+  const chapters = await scanNiveraCdnChapters({
+    sourceUrl: String(job.source_url || ""),
+    sourceName: requestedSeriesName,
+    startChap: Number(job.start_chap),
+    endChap: Number(job.end_chap),
+    maxGroups: 40,
+    pageMax: Number((job as any).page_max || 300),
+    groupMissLimit: 3,
+    pageMissLimit: 3,
+  });
+
+  if (chapters.length === 0) {
+    throw new Error("No chapter images were found on the Nivera CDN.");
+  }
+
+  logger.info(`Nivera metadata search: ${requestedSeriesName}`);
+  const metadata = await searchAniListByTitle(requestedSeriesName);
+  const seriesName = metadata?.titleRomaji || requestedSeriesName;
+  const searchName = buildSearchName({
+    titleRomaji: metadata?.titleRomaji,
+    titleEnglish: metadata?.titleEnglish,
+    titleNative: metadata?.titleNative,
+    synonyms: metadata?.synonyms || [],
+    fallbackTitle: requestedSeriesName,
+  });
+
+  const series = await upsertSeries({
+    name: seriesName,
+    seriesuid: seriesSlug,
+    coverImageUrl: metadata?.coverImage || "",
+    des: "Aciklama henuz eklenmemis gorunuyor...",
+    kaynak: "Nivera",
+    final: mapAniListStatus(metadata?.status || null),
+    searchName,
+  });
+
+  logger.info(
+    `Nivera series upsert completed | ID: ${series.series_id} | UID: ${series.seriesuid}`
+  );
+
+  await applyCategories({
+    seriesId: series.seriesuid,
+    genres: metadata?.genres || [],
+  });
+
+  let displayChapterNumber = 1;
+
+  for (const chapter of chapters) {
+    const uploadResult = await uploadChapterImages({
+      seriesSlug: series.seriesuid,
+      chapter: displayChapterNumber,
+      imageUrls: chapter.imageUrls,
+      source: "nivera_cdn",
+    });
+
+    logger.info(
+      `Nivera chapter uploaded | Source: ${chapter.chapter} | Otoku: ${displayChapterNumber} | Pages: ${uploadResult.pageCount}`
+    );
+
+    const eps = String(displayChapterNumber);
+    const epsuid = `${series.seriesuid}-${displayChapterNumber}`;
+
+    await upsertChapter({
+      eps,
+      epsuid,
+      seriesId: series.seriesuid,
+      chapterurl: uploadResult.baseUrl,
+    });
+
+    displayChapterNumber++;
+  }
+
+  await updateImportJobStatus({
+    jobId: job.id,
+    status: "completed",
+    seriesId: series.seriesuid,
+    seriesName,
+  });
+
+  logger.info(`Nivera CDN job completed: #${job.id}`);
+  return displayChapterNumber - 1;
+}
+// NIVERA_CDN_V4_0_2_END
+
 export async function runImportWorker(): Promise<ImportRunResult> {
   const job = await getNextImportJob();
 
@@ -473,10 +761,13 @@ export async function runImportWorker(): Promise<ImportRunResult> {
     let chapterCount = 0;
 
     if (rawSource === "siyahmelek_api") {
-      logger.info("SiyahMelek API branch seçildi.");
+      logger.info("SiyahMelek API branch selected.");
       chapterCount = await runSiyahMelekApiJob(job);
+    } else if (rawSource === "nivera" || rawSource === "nivera_cdn") {
+      logger.info("Nivera CDN branch selected.");
+      chapterCount = await runNiveraCdnJobV402(job);
     } else {
-      logger.info("Mangtto branch seçildi.");
+      logger.info("Mangtto branch selected.");
       chapterCount = await runMangttoJob(job);
     }
 

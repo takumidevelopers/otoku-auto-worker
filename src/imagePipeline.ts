@@ -3,6 +3,7 @@ import probe from "probe-image-size";
 import sharp from "sharp";
 import { uploadBufferToB2 } from "./b2";
 import { logger } from "./logger";
+import { fetchNiveraBinary } from "./niveraTransport";
 
 const STRICT_MANGA_FILTER = true;
 const MAX_IMAGE_HEIGHT = 4096;
@@ -25,6 +26,10 @@ function getReferer(source?: string): string {
     return "https://siyahmelek.site/";
   }
 
+  if (source === "nivera" || source === "nivera_cdn") {
+    return "https://niverafansub.one/";
+  }
+
   return "https://mangtto.com/";
 }
 
@@ -32,17 +37,69 @@ async function downloadImageBuffer(params: {
   url: string;
   source?: string;
 }): Promise<Buffer> {
-  const response = await axios.get<ArrayBuffer>(params.url, {
-    responseType: "arraybuffer",
-    timeout: 30000,
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-      Referer: getReferer(params.source),
-    },
-  });
+  const headers: Record<string, string> = {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+    Referer: getReferer(params.source),
+    Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+  };
 
-  return Buffer.from(response.data);
+  if (params.source === "nivera" || params.source === "nivera_fansub") {
+    const cookie = String(
+      process.env.NIVERA_COOKIE || process.env.NIVERA_SESSION_COOKIE || ""
+    ).trim();
+
+    if (cookie) {
+      headers.Cookie = cookie;
+    }
+  }
+
+  try {
+    const response = await axios.get<ArrayBuffer>(params.url, {
+      responseType: "arraybuffer",
+      timeout: 30000,
+      maxRedirects: 3,
+      headers,
+    });
+
+    const contentType = String(response.headers?.["content-type"] || "").toLowerCase();
+
+    if (
+      (params.source === "nivera" || params.source === "nivera_fansub") &&
+      !contentType.includes("image")
+    ) {
+      throw new Error(
+        `Nivera görsel isteği image yerine ${contentType || "bilinmeyen içerik"} döndürdü.`
+      );
+    }
+
+    return Buffer.from(response.data);
+  } catch (error) {
+    if (params.source !== "nivera" && params.source !== "nivera_fansub") {
+      throw error;
+    }
+
+    logger.warn(
+      `Nivera görseli Axios ile indirilemedi; TLS tarayıcı taklidi deneniyor | ${params.url}`
+    );
+
+    const result = await fetchNiveraBinary({
+      url: params.url,
+      referer: getReferer(params.source),
+    });
+
+    if (result.status < 200 || result.status >= 300 || result.buffer.length === 0) {
+      throw new Error(
+        `Nivera TLS görsel indirme başarısız | HTTP ${result.status} | ${params.url}`
+      );
+    }
+
+    logger.info(
+      `Nivera TLS görsel indirildi | Target: ${result.impersonate} | Bytes: ${result.buffer.length} | ${params.url}`
+    );
+
+    return result.buffer;
+  }
 }
 
 async function withRetry<T>(
