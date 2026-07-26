@@ -1,4 +1,4 @@
-import axios, { type AxiosResponse } from "axios";
+﻿import axios, { type AxiosResponse } from "axios";
 import { logger } from "./logger";
 
 export type NiveraCdnChapter = {
@@ -27,12 +27,12 @@ function slugify(input: string): string {
   return input
     .toLowerCase()
     .trim()
-    .replace(/ğ/g, "g")
-    .replace(/ü/g, "u")
-    .replace(/ş/g, "s")
-    .replace(/ı/g, "i")
-    .replace(/ö/g, "o")
-    .replace(/ç/g, "c")
+    .replace(/ÄŸ/g, "g")
+    .replace(/Ã¼/g, "u")
+    .replace(/ÅŸ/g, "s")
+    .replace(/Ä±/g, "i")
+    .replace(/Ã¶/g, "o")
+    .replace(/Ã§/g, "c")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 }
@@ -49,7 +49,7 @@ export function extractNiveraCdnConfig(params: {
 
   if (!raw) {
     throw new Error(
-      "Nivera CDN source_url boş. yedek.mangawow.com üzerindeki bir bölüm görseli verilmelidir."
+      "Nivera CDN source_url boÅŸ. yedek.mangawow.com Ã¼zerindeki bir bÃ¶lÃ¼m gÃ¶rseli verilmelidir."
     );
   }
 
@@ -58,12 +58,12 @@ export function extractNiveraCdnConfig(params: {
   try {
     parsed = new URL(raw);
   } catch {
-    throw new Error(`Nivera CDN source_url geçerli bir URL değil: ${raw}`);
+    throw new Error(`Nivera CDN source_url geÃ§erli bir URL deÄŸil: ${raw}`);
   }
 
   if (parsed.hostname.toLowerCase() !== DEFAULT_CDN_HOST) {
     throw new Error(
-      `Nivera CDN source_url hostu ${DEFAULT_CDN_HOST} olmalı. Gelen: ${parsed.hostname}`
+      `Nivera CDN source_url hostu ${DEFAULT_CDN_HOST} olmalÄ±. Gelen: ${parsed.hostname}`
     );
   }
 
@@ -76,7 +76,7 @@ export function extractNiveraCdnConfig(params: {
 
   if (!/^manga_[a-z0-9]+$/i.test(cdnSeriesId)) {
     throw new Error(
-      "Nivera CDN URL içinde manga_xxx seri klasörü bulunamadı. Örnek: /nivera/data/manga_62f38fb4701bd/..."
+      "Nivera CDN URL iÃ§inde manga_xxx seri klasÃ¶rÃ¼ bulunamadÄ±. Ã–rnek: /nivera/data/manga_62f38fb4701bd/..."
     );
   }
 
@@ -87,7 +87,7 @@ export function extractNiveraCdnConfig(params: {
 
   if (!seriesSlug) {
     throw new Error(
-      "Seri slugı çıkarılamadı. source_url için mümkünse 0-seri-slug.jpg görselini kullan veya source_name alanını doldur."
+      "Seri slugÄ± Ã§Ä±karÄ±lamadÄ±. source_url iÃ§in mÃ¼mkÃ¼nse 0-seri-slug.jpg gÃ¶rselini kullan veya source_name alanÄ±nÄ± doldur."
     );
   }
 
@@ -158,7 +158,7 @@ async function fetchChapterSlugs(seriesSlug: string): Promise<Array<{
 
   if (response.status < 200 || response.status >= 300) {
     throw new Error(
-      `Nivera chapter endpoint başarısız. HTTP ${response.status} | ${endpoint}`
+      `Nivera chapter endpoint baÅŸarÄ±sÄ±z. HTTP ${response.status} | ${endpoint}`
     );
   }
 
@@ -273,6 +273,31 @@ async function findImageVariant(baseWithoutExtension: string): Promise<string | 
   return null;
 }
 
+// NIVERA_KOPYA_VARIANT_V4_2
+async function findChapterPageVariant(params: {
+  chapterRoot: string;
+  group: number;
+  page: number;
+}): Promise<string | null> {
+  const pageNumber = String(params.page).padStart(3, "0");
+
+  const candidates = [
+    `s${params.group}_${pageNumber}`,
+    `s${params.group}-kopya_${pageNumber}`,
+  ];
+
+  for (const candidate of candidates) {
+    const found = await findImageVariant(
+      `${params.chapterRoot}${candidate}`
+    );
+
+    if (found) {
+      return found;
+    }
+  }
+
+  return null;
+}
 async function scanChapterImages(params: {
   config: NiveraCdnConfig;
   chapterSlug: string;
@@ -305,8 +330,11 @@ async function scanChapterImages(params: {
     let consecutiveMissingPages = 0;
 
     for (let page = 1; page <= params.pageMax; page++) {
-      const pageName = `s${group}_${String(page).padStart(3, "0")}`;
-      const found = await findImageVariant(`${chapterRoot}${pageName}`);
+      const found = await findChapterPageVariant({
+        chapterRoot,
+        group,
+        page,
+      });
 
       if (found) {
         groupImages.push(found);
@@ -373,11 +401,11 @@ export async function scanNiveraCdnChapters(params: {
   const endChap = Number(params.endChap);
 
   if (!Number.isFinite(startChap) || !Number.isFinite(endChap) || startChap > endChap) {
-    throw new Error(`Nivera bölüm aralığı geçersiz: ${params.startChap}-${params.endChap}`);
+    throw new Error(`Nivera bÃ¶lÃ¼m aralÄ±ÄŸÄ± geÃ§ersiz: ${params.startChap}-${params.endChap}`);
   }
 
   logger.info(
-    `Nivera CDN tarama başladı | Seri: ${config.seriesSlug} | CDN: ${config.cdnSeriesId} | Range: ${startChap}-${endChap}`
+    `Nivera CDN tarama baÅŸladÄ± | Seri: ${config.seriesSlug} | CDN: ${config.cdnSeriesId} | Range: ${startChap}-${endChap}`
   );
 
   let chapterIndex: Array<{ chapter: number; sourceChapter: string; chapterSlug: string }> = [];
@@ -387,7 +415,7 @@ export async function scanNiveraCdnChapters(params: {
     logger.info(`Nivera chapter endpoint sonucu | Toplam: ${chapterIndex.length}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    logger.warn(`Nivera chapter endpoint kullanılamadı; sayısal CDN taramasına geçiliyor. ${message}`);
+    logger.warn(`Nivera chapter endpoint kullanÄ±lamadÄ±; sayÄ±sal CDN taramasÄ±na geÃ§iliyor. ${message}`);
   }
 
   const selected = (chapterIndex.length > 0
@@ -397,7 +425,7 @@ export async function scanNiveraCdnChapters(params: {
 
   if (selected.length === 0) {
     throw new Error(
-      `Nivera bölüm listesinde ${startChap}-${endChap} aralığında bölüm bulunamadı.`
+      `Nivera bÃ¶lÃ¼m listesinde ${startChap}-${endChap} aralÄ±ÄŸÄ±nda bÃ¶lÃ¼m bulunamadÄ±.`
     );
   }
 
@@ -405,7 +433,7 @@ export async function scanNiveraCdnChapters(params: {
 
   for (const item of selected) {
     logger.info(
-      `Nivera CDN bölüm taranıyor | Chapter: ${item.chapter} | Folder: ${item.chapterSlug}`
+      `Nivera CDN bÃ¶lÃ¼m taranÄ±yor | Chapter: ${item.chapter} | Folder: ${item.chapterSlug}`
     );
 
     const imageUrls = await scanChapterImages({
@@ -419,13 +447,13 @@ export async function scanNiveraCdnChapters(params: {
 
     if (imageUrls.length === 0) {
       logger.warn(
-        `Nivera CDN bölüm boş, atlandı | Chapter: ${item.chapter} | Folder: ${item.chapterSlug}`
+        `Nivera CDN bÃ¶lÃ¼m boÅŸ, atlandÄ± | Chapter: ${item.chapter} | Folder: ${item.chapterSlug}`
       );
       continue;
     }
 
     logger.info(
-      `Nivera CDN bölüm bulundu | Chapter: ${item.chapter} | Görsel: ${imageUrls.length}`
+      `Nivera CDN bÃ¶lÃ¼m bulundu | Chapter: ${item.chapter} | GÃ¶rsel: ${imageUrls.length}`
     );
 
     results.push({
@@ -440,3 +468,4 @@ export async function scanNiveraCdnChapters(params: {
 
   return results;
 }
+
