@@ -204,7 +204,7 @@ async function probeByGet(url: string): Promise<boolean> {
   try {
     const response = await axios.get(url, {
       responseType: "stream",
-      timeout: 15000,
+      timeout: 8000,
       maxRedirects: 3,
       headers: {
         "User-Agent":
@@ -231,7 +231,7 @@ async function probeByGet(url: string): Promise<boolean> {
 async function imageExists(url: string): Promise<boolean> {
   try {
     const response = await axios.head(url, {
-      timeout: 10000,
+      timeout: 5000,
       maxRedirects: 3,
       headers: {
         "User-Agent":
@@ -274,22 +274,31 @@ async function findImageVariant(baseWithoutExtension: string): Promise<string | 
 }
 
 // NIVERA_DUAL_ROOT_V4_3_START
-async function findChapterPageVariantV430(params: {
-  chapterRoot: string;
-  group: number;
-  page: number;
-}): Promise<string | null> {
-  const pageNumber = String(params.page).padStart(3, "0");
+// NIVERA_FAST_PROBE_V4_4_1
+async function findFirstExistingUrlV441(
+  urls: string[]
+): Promise<string | null> {
+  const results = await Promise.all(
+    urls.map(async (url) =>
+      (await imageExists(url)) ? url : null
+    )
+  );
 
-  const candidates = [
-    `s${params.group}_${pageNumber}`,
-    `s${params.group}-kopya_${pageNumber}`,
-  ];
+  return results.find(
+    (url): url is string => Boolean(url)
+  ) || null;
+}
 
-  for (const candidate of candidates) {
-    const found = await findImageVariant(
-      `${params.chapterRoot}${candidate}`
+async function findImageFromBasesV441(
+  basesWithoutExtension: string[]
+): Promise<string | null> {
+  for (const extension of IMAGE_EXTENSIONS) {
+    const urls = basesWithoutExtension.map(
+      (base) => `${base}.${extension}`
     );
+
+    const found =
+      await findFirstExistingUrlV441(urls);
 
     if (found) {
       return found;
@@ -299,6 +308,28 @@ async function findChapterPageVariantV430(params: {
   return null;
 }
 
+async function findChapterPageVariantV430(params: {
+  chapterRoot: string;
+  group: number;
+  page: number;
+}): Promise<string | null> {
+  const pageNumber =
+    String(params.page).padStart(3, "0");
+
+  const candidates = [
+    `s${params.group}_${pageNumber}`,
+    `s${params.group}-kopya_${pageNumber}`,
+    `${params.group}_${pageNumber}`,
+    `${params.group}-kopya_${pageNumber}`,
+  ];
+
+  return findImageFromBasesV441(
+    candidates.map(
+      (candidate) =>
+        `${params.chapterRoot}${candidate}`
+    )
+  );
+}
 function buildNiveraSeriesRootsV430(
   primaryRoot: string
 ): string[] {
@@ -335,10 +366,10 @@ async function scanChapterImagesAtRootV430(params: {
   if (await imageExists(preferredLeadUrl)) {
     images.push(preferredLeadUrl);
   } else {
-    const leadBase =
-      `${params.chapterRoot}0-${params.config.seriesSlug}`;
-
-    const lead = await findImageVariant(leadBase);
+    const lead = await findImageFromBasesV441([
+      `${params.chapterRoot}0-${params.config.seriesSlug}`,
+      `${params.chapterRoot}0-${params.config.seriesSlug}-kopya`,
+    ]);
 
     if (lead) {
       images.push(lead);
@@ -548,4 +579,6 @@ export async function scanNiveraCdnChapters(params: {
 
   return results;
 }
+
+
 
