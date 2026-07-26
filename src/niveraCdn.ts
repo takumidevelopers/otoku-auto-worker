@@ -273,8 +273,8 @@ async function findImageVariant(baseWithoutExtension: string): Promise<string | 
   return null;
 }
 
-// NIVERA_KOPYA_VARIANT_V4_2
-async function findChapterPageVariant(params: {
+// NIVERA_DUAL_ROOT_V4_3_START
+async function findChapterPageVariantV430(params: {
   chapterRoot: string;
   group: number;
   page: number;
@@ -298,23 +298,46 @@ async function findChapterPageVariant(params: {
 
   return null;
 }
-async function scanChapterImages(params: {
+
+function buildNiveraSeriesRootsV430(
+  primaryRoot: string
+): string[] {
+  const roots = [
+    primaryRoot,
+    primaryRoot.replace(
+      "/nivera/data/",
+      "/nivera/data2/data/"
+    ),
+  ];
+
+  return Array.from(
+    new Set(
+      roots
+        .map((root) => root.trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+async function scanChapterImagesAtRootV430(params: {
   config: NiveraCdnConfig;
-  chapterSlug: string;
+  chapterRoot: string;
   maxGroups: number;
   pageMax: number;
   groupMissLimit: number;
   pageMissLimit: number;
 }): Promise<string[]> {
-  const chapterRoot = `${params.config.cdnSeriesRoot}${params.chapterSlug}/`;
   const images: string[] = [];
 
-  const preferredLeadUrl = `${chapterRoot}${params.config.leadImageName}`;
+  const preferredLeadUrl =
+    `${params.chapterRoot}${params.config.leadImageName}`;
 
   if (await imageExists(preferredLeadUrl)) {
     images.push(preferredLeadUrl);
   } else {
-    const leadBase = `${chapterRoot}0-${params.config.seriesSlug}`;
+    const leadBase =
+      `${params.chapterRoot}0-${params.config.seriesSlug}`;
+
     const lead = await findImageVariant(leadBase);
 
     if (lead) {
@@ -325,16 +348,25 @@ async function scanChapterImages(params: {
   let consecutiveEmptyGroups = 0;
   let foundSection = false;
 
-  for (let group = 1; group <= params.maxGroups; group++) {
+  for (
+    let group = 1;
+    group <= params.maxGroups;
+    group++
+  ) {
     const groupImages: string[] = [];
     let consecutiveMissingPages = 0;
 
-    for (let page = 1; page <= params.pageMax; page++) {
-      const found = await findChapterPageVariant({
-        chapterRoot,
-        group,
-        page,
-      });
+    for (
+      let page = 1;
+      page <= params.pageMax;
+      page++
+    ) {
+      const found =
+        await findChapterPageVariantV430({
+          chapterRoot: params.chapterRoot,
+          group,
+          page,
+        });
 
       if (found) {
         groupImages.push(found);
@@ -342,7 +374,10 @@ async function scanChapterImages(params: {
       } else {
         consecutiveMissingPages++;
 
-        if (consecutiveMissingPages >= params.pageMissLimit) {
+        if (
+          consecutiveMissingPages >=
+          params.pageMissLimit
+        ) {
           break;
         }
       }
@@ -352,8 +387,15 @@ async function scanChapterImages(params: {
       consecutiveEmptyGroups++;
 
       if (
-        (foundSection && consecutiveEmptyGroups >= params.groupMissLimit) ||
-        (!foundSection && group >= params.groupMissLimit)
+        (
+          foundSection &&
+          consecutiveEmptyGroups >=
+            params.groupMissLimit
+        ) ||
+        (
+          !foundSection &&
+          group >= params.groupMissLimit
+        )
       ) {
         break;
       }
@@ -366,6 +408,45 @@ async function scanChapterImages(params: {
 
   return Array.from(new Set(images));
 }
+
+async function scanChapterImages(params: {
+  config: NiveraCdnConfig;
+  chapterSlug: string;
+  maxGroups: number;
+  pageMax: number;
+  groupMissLimit: number;
+  pageMissLimit: number;
+}): Promise<string[]> {
+  const seriesRoots = buildNiveraSeriesRootsV430(
+    params.config.cdnSeriesRoot
+  );
+
+  for (const seriesRoot of seriesRoots) {
+    const chapterRoot =
+      `${seriesRoot}${params.chapterSlug}/`;
+
+    const images =
+      await scanChapterImagesAtRootV430({
+        config: params.config,
+        chapterRoot,
+        maxGroups: params.maxGroups,
+        pageMax: params.pageMax,
+        groupMissLimit: params.groupMissLimit,
+        pageMissLimit: params.pageMissLimit,
+      });
+
+    if (images.length > 0) {
+      logger.info(
+        `Nivera CDN kökü seçildi | Folder: ${params.chapterSlug} | Root: ${seriesRoot} | Görsel: ${images.length}`
+      );
+
+      return images;
+    }
+  }
+
+  return [];
+}
+// NIVERA_DUAL_ROOT_V4_3_END
 
 function buildFallbackChapterIndex(startChap: number, endChap: number) {
   const chapters: Array<{ chapter: number; sourceChapter: string; chapterSlug: string }> = [];
@@ -446,10 +527,9 @@ export async function scanNiveraCdnChapters(params: {
     });
 
     if (imageUrls.length === 0) {
-      logger.warn(
-        `Nivera CDN bÃ¶lÃ¼m boÅŸ, atlandÄ± | Chapter: ${item.chapter} | Folder: ${item.chapterSlug}`
+      throw new Error(
+        `Nivera CDN bölüm görselleri iki kökte de bulunamadı. Chapter: ${item.chapter} | Folder: ${item.chapterSlug} | Roots: /nivera/data/ ve /nivera/data2/data/`
       );
-      continue;
     }
 
     logger.info(
