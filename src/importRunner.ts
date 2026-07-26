@@ -623,10 +623,10 @@ async function runMangttoJob(job: ImportJob): Promise<number> {
   return displayChapterNumber - 1;
 }
 
-// NIVERA_CDN_V4_0_2_START
-function getNiveraCdnSeriesNameV402(job: ImportJob): string {
+// NIVERA_CDN_V4_1_START
+function getNiveraCdnSeriesNameV410(job: ImportJob): string {
   const anyJob = job as any;
-  const formName = String(anyJob.source_name || anyJob.series_name || "").trim();
+  const formName = String(anyJob.series_name || anyJob.source_name || "").trim();
 
   if (formName && formName !== "nivera" && formName !== "nivera_cdn") {
     return formName;
@@ -641,17 +641,69 @@ function getNiveraCdnSeriesNameV402(job: ImportJob): string {
   }
 
   throw new Error(
-    "Nivera CDN job requires source_name, or source_url must point to a 0-series-slug.jpg file."
+    "Nivera CDN job için seri adı zorunlu; source_name/series_name boş ve 0-seri-slug.jpg kalıbı bulunamadı."
   );
 }
 
-async function runNiveraCdnJobV402(job: ImportJob): Promise<number> {
-  const requestedSeriesName = getNiveraCdnSeriesNameV402(job);
-  const baseSeriesSlug = slugify(requestedSeriesName);
-  const seriesSlug = await getAvailableSeriesSlug(baseSeriesSlug || "nivera-series");
+function normalizeNiveraTitleV410(value: unknown): string {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isSafeNiveraAniListMatchV410(
+  requestedTitle: string,
+  metadata: NonNullable<Awaited<ReturnType<typeof searchAniListByTitle>>>
+): boolean {
+  const requested = normalizeNiveraTitleV410(requestedTitle);
+
+  const titleCandidates = [
+    metadata.titleRomaji,
+    metadata.titleEnglish,
+    metadata.titleNative,
+    ...(metadata.synonyms || []),
+  ]
+    .map(normalizeNiveraTitleV410)
+    .filter(Boolean);
+
+  const exactTitleMatch = requested !== "" && titleCandidates.includes(requested);
+  const normalizedGenres = (metadata.genres || []).map(normalizeNiveraTitleV410);
+  const hasBlGenre = normalizedGenres.some((genre) =>
+    ["boys love", "yaoi", "shounen ai", "boy love", "bl"].includes(genre)
+  );
+
+  return exactTitleMatch && hasBlGenre;
+}
+
+async function applyNiveraCategoriesV410(seriesId: string): Promise<void> {
+  await upsertSeriesCategory({
+    seriesId,
+    categoryId: "a2ddc080-a107-1f87-8e90-bfdab6e34c7e",
+    categoryName: "Yaoi",
+  });
+  logger.info("Nivera zorunlu kategori eklendi | Yaoi");
+
+  await upsertSeriesCategory({
+    seriesId,
+    categoryId: CATEGORY_MAP.Adult.categoryId,
+    categoryName: CATEGORY_MAP.Adult.categoryName,
+  });
+  logger.info("Nivera zorunlu kategori eklendi | +18");
+}
+
+async function runNiveraCdnJobV410(job: ImportJob): Promise<number> {
+  const requestedSeriesName = getNiveraCdnSeriesNameV410(job);
+  const baseSeriesSlug = slugify(requestedSeriesName) || "nivera-series";
+  const existingSeriesId = String((job as any).series_id || "").trim();
+  const seriesSlug = existingSeriesId || (await getAvailableSeriesSlug(baseSeriesSlug));
 
   logger.info(
-    `Nivera CDN series slug | Name: ${requestedSeriesName} | Slug: ${seriesSlug}`
+    `Nivera CDN series slug | Name: ${requestedSeriesName} | Slug: ${seriesSlug} | Existing: ${Boolean(existingSeriesId)}`
   );
 
   const chapters = await scanNiveraCdnChapters({
@@ -666,12 +718,32 @@ async function runNiveraCdnJobV402(job: ImportJob): Promise<number> {
   });
 
   if (chapters.length === 0) {
-    throw new Error("No chapter images were found on the Nivera CDN.");
+    throw new Error("Nivera CDN üzerinde bölüm görseli bulunamadı.");
   }
 
-  logger.info(`Nivera metadata search: ${requestedSeriesName}`);
-  const metadata = await searchAniListByTitle(requestedSeriesName);
-  const seriesName = metadata?.titleRomaji || requestedSeriesName;
+  let metadata: Awaited<ReturnType<typeof searchAniListByTitle>> = null;
+
+  try {
+    logger.info(`Nivera AniList güvenli arama | ${requestedSeriesName}`);
+    const candidate = await searchAniListByTitle(requestedSeriesName);
+
+    if (candidate && isSafeNiveraAniListMatchV410(requestedSeriesName, candidate)) {
+      metadata = candidate;
+      logger.info(
+        `Nivera AniList eşleşmesi kabul edildi | Requested: ${requestedSeriesName} | Romaji: ${candidate.titleRomaji}`
+      );
+    } else if (candidate) {
+      logger.warn(
+        `Nivera AniList eşleşmesi reddedildi | Requested: ${requestedSeriesName} | Romaji: ${candidate.titleRomaji} | English: ${candidate.titleEnglish || "YOK"} | Genres: ${(candidate.genres || []).join(", ") || "YOK"}`
+      );
+    }
+  } catch (error) {
+    logger.warn(
+      `Nivera AniList isteği başarısız; metadata olmadan devam ediliyor | ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  const seriesName = requestedSeriesName;
   const searchName = buildSearchName({
     titleRomaji: metadata?.titleRomaji,
     titleEnglish: metadata?.titleEnglish,
@@ -684,20 +756,17 @@ async function runNiveraCdnJobV402(job: ImportJob): Promise<number> {
     name: seriesName,
     seriesuid: seriesSlug,
     coverImageUrl: metadata?.coverImage || "",
-    des: "Aciklama henuz eklenmemis gorunuyor...",
+    des: metadata?.description || "",
     kaynak: "Nivera",
-    final: mapAniListStatus(metadata?.status || null),
+    final: metadata ? mapAniListStatus(metadata.status || null) : "Devam Ediyor",
     searchName,
   });
 
   logger.info(
-    `Nivera series upsert completed | ID: ${series.series_id} | UID: ${series.seriesuid}`
+    `Nivera series upsert completed | ID: ${series.series_id} | UID: ${series.seriesuid} | Metadata: ${metadata ? "accepted" : "skipped"}`
   );
 
-  await applyCategories({
-    seriesId: series.seriesuid,
-    genres: metadata?.genres || [],
-  });
+  await applyNiveraCategoriesV410(series.seriesuid);
 
   let displayChapterNumber = 1;
 
@@ -736,7 +805,7 @@ async function runNiveraCdnJobV402(job: ImportJob): Promise<number> {
   logger.info(`Nivera CDN job completed: #${job.id}`);
   return displayChapterNumber - 1;
 }
-// NIVERA_CDN_V4_0_2_END
+// NIVERA_CDN_V4_1_END
 
 export async function runImportWorker(): Promise<ImportRunResult> {
   const job = await getNextImportJob();
@@ -765,7 +834,7 @@ export async function runImportWorker(): Promise<ImportRunResult> {
       chapterCount = await runSiyahMelekApiJob(job);
     } else if (rawSource === "nivera" || rawSource === "nivera_cdn") {
       logger.info("Nivera CDN branch selected.");
-      chapterCount = await runNiveraCdnJobV402(job);
+      chapterCount = await runNiveraCdnJobV410(job);
     } else {
       logger.info("Mangtto branch selected.");
       chapterCount = await runMangttoJob(job);
