@@ -255,41 +255,44 @@ export async function uploadChapterImages(params: {
       } | ${imageUrl}`
     );
 
-    const uploadedUrls = await withRetry(async () => {
-      const buffer = await downloadImageBuffer({
-        url: imageUrl,
-        source: params.source,
-      });
+    // ECONNRESET_UPLOAD_RETRY_V5_1
+    const buffer = await withRetry(
+      () =>
+        downloadImageBuffer({
+          url: imageUrl,
+          source: params.source,
+        }),
+      5,
+      1000
+    );
 
-      if (shouldSkipImage(buffer, imageUrl)) {
-        return [];
-      }
+    if (shouldSkipImage(buffer, imageUrl)) {
+      await sleep(300);
+      continue;
+    }
 
-      const buffers = await splitImageIfTooLong(buffer, imageUrl);
-      const urls: string[] = [];
+    const buffers = await splitImageIfTooLong(buffer, imageUrl);
 
-      for (const partBuffer of buffers) {
-        const pageNumber = pageUrls.length + urls.length + 1;
-        const key = `${params.seriesSlug}/${params.chapter}/${pageNumber}.jpg`;
+    for (const partBuffer of buffers) {
+      const pageNumber = pageUrls.length + 1;
+      const key = `${params.seriesSlug}/${params.chapter}/${pageNumber}.jpg`;
 
-        logger.info(
-          `Yükleniyor | Chapter ${params.chapter} | Page ${pageNumber} | ${key}`
-        );
+      logger.info(
+        `Yükleniyor | Chapter ${params.chapter} | Page ${pageNumber} | ${key}`
+      );
 
-        const publicUrl = await uploadBufferToB2({
-          key,
-          buffer: partBuffer,
-          contentType: "image/jpeg",
-        });
+      const publicUrl = await withRetry(
+        () =>
+          uploadBufferToB2({
+            key,
+            buffer: partBuffer,
+            contentType: "image/jpeg",
+          }),
+        5,
+        1500
+      );
 
-        urls.push(publicUrl);
-      }
-
-      return urls;
-    });
-
-    if (uploadedUrls.length > 0) {
-      pageUrls.push(...uploadedUrls);
+      pageUrls.push(publicUrl);
     }
 
     await sleep(300);
