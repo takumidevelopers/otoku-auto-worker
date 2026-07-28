@@ -9,6 +9,11 @@ const STRICT_MANGA_FILTER = true;
 const MAX_IMAGE_HEIGHT = 4096;
 const JPEG_QUALITY = 95;
 
+// LOW_MEMORY_IMAGE_PIPELINE_V6_1
+// libvips cache ve paralel çalışan sharp işlerini sınırlar.
+sharp.cache(false);
+sharp.concurrency(1);
+
 // 490px geniş manga sayfaları vardı; 500 olursa gerçek sayfayı çöpe atıyor.
 const MIN_MANGA_WIDTH = 420;
 const MIN_MANGA_HEIGHT = 700;
@@ -166,69 +171,245 @@ function shouldSkipImage(buffer: Buffer, imageUrl: string): boolean {
   }
 }
 
-async function splitImageIfTooLong(
-  buffer: Buffer,
-  imageUrl: string
-): Promise<Buffer[]> {
+function formatMemoryUsageV610(): string {
+  const usage = process.memoryUsage();
+
+  const toMb = (bytes: number): string =>
+    (bytes / 1024 / 1024).toFixed(1);
+
+  return [
+    `rss=${toMb(usage.rss)}MB`,
+    `heap=${toMb(usage.heapUsed)}MB`,
+    `external=${toMb(usage.external)}MB`,
+    `arrayBuffers=${toMb(usage.arrayBuffers)}MB`,
+  ].join(" | ");
+}
+
+async function yieldForNativeCleanupV610(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setImmediate(resolve);
+  });
+}
+
+async function uploadPageBufferV610(params: {
+  seriesSlug: string;
+  chapter: number;
+  buffer: Buffer;
+  pageUrls: string[];
+}): Promise<void> {
+  const pageNumber =
+    params.pageUrls.length + 1;
+
+  const key =
+    `${params.seriesSlug}/${params.chapter}/${pageNumber}.jpg`;
+
+  logger.info(
+    `Yükleniyor | Chapter ${params.chapter} | Page ${pageNumber} | ${key}`
+  );
+
+  const publicUrl = await withRetry(
+    () =>
+      uploadBufferToB2({
+        key,
+        buffer: params.buffer,
+        contentType: "image/jpeg",
+      }),
+    5,
+    1500
+  );
+
+  params.pageUrls.push(publicUrl);
+}
+
+async function processAndUploadImageBufferV610(params: {
+  buffer: Buffer;
+  imageUrl: string;
+  seriesSlug: string;
+  chapter: number;
+  pageUrls: string[];
+}): Promise<void> {
+  let metadata:
+    sharp.Metadata | null = null;
+
   try {
-    const metadata = await sharp(buffer, { limitInputPixels: false }).metadata();
+    metadata = await sharp(
+      params.buffer,
+      {
+        limitInputPixels: false,
+        sequentialRead: true,
+      }
+    ).metadata();
+  } catch (error) {
+    logger.warn(
+      `SPLIT_METADATA_FAILED | ${params.imageUrl} | ${
+        error instanceof Error
+          ? error.message
+          : String(error)
+      }`
+    );
+  }
 
-    if (!metadata.width || !metadata.height) {
-      logger.warn(`SPLIT_SKIPPED_INVALID_METADATA | ${imageUrl}`);
-      return [buffer];
-    }
+  if (
+    !metadata?.width ||
+    !metadata?.height
+  ) {
+    logger.warn(
+      `SPLIT_FALLBACK_ORIGINAL | Metadata yok | ${params.imageUrl}`
+    );
 
-    if (metadata.height <= MAX_IMAGE_HEIGHT) {
-      logger.info(
-        `SPLIT_NOT_NEEDED | ${metadata.width}x${metadata.height} | ${imageUrl}`
+    await uploadPageBufferV610({
+      seriesSlug:
+        params.seriesSlug,
+      chapter:
+        params.chapter,
+      buffer:
+        params.buffer,
+      pageUrls:
+        params.pageUrls,
+    });
+
+    return;
+  }
+
+  if (
+    metadata.height <=
+    MAX_IMAGE_HEIGHT
+  ) {
+    let normalized:
+      Buffer;
+
+    try {
+      normalized =
+        await sharp(
+          params.buffer,
+          {
+            limitInputPixels:
+              false,
+            sequentialRead:
+              true,
+          }
+        )
+          .jpeg({
+            quality:
+              JPEG_QUALITY,
+            /*
+             * mozjpeg uzun görsellerde daha fazla CPU/native bellek
+             * kullanabildiği için düşük bellek modunda kapalıdır.
+             */
+            mozjpeg:
+              false,
+          })
+          .toBuffer();
+    } catch (error) {
+      logger.warn(
+        `NORMALIZE_FAILED_USING_ORIGINAL | ${params.imageUrl} | ${
+          error instanceof Error
+            ? error.message
+            : String(error)
+        }`
       );
 
-      const normalized = await sharp(buffer, { limitInputPixels: false })
-        .jpeg({ quality: JPEG_QUALITY, mozjpeg: true })
-        .toBuffer();
-
-      return [normalized];
-    }
-
-    const parts: Buffer[] = [];
-
-    for (let top = 0; top < metadata.height; top += MAX_IMAGE_HEIGHT) {
-      const sliceHeight = Math.min(MAX_IMAGE_HEIGHT, metadata.height - top);
-
-      const part = await sharp(buffer, { limitInputPixels: false })
-        .extract({
-          left: 0,
-          top,
-          width: metadata.width,
-          height: sliceHeight,
-        })
-        .jpeg({
-          quality: JPEG_QUALITY,
-          mozjpeg: true,
-        })
-        .toBuffer();
-
-      parts.push(part);
-
-      logger.info(
-        `SPLIT_PART | ${metadata.width}x${metadata.height} | top=${top} | height=${sliceHeight} | ${imageUrl}`
-      );
+      normalized =
+        params.buffer;
     }
 
     logger.info(
-      `SPLIT_IMAGE | ${metadata.width}x${metadata.height} -> ${parts.length} parça | ${imageUrl}`
+      `SPLIT_NOT_NEEDED | ${metadata.width}x${metadata.height} | ${params.imageUrl}`
     );
 
-    return parts;
-  } catch (err) {
-    logger.warn(
-      `SPLIT_IMAGE_FAILED | ${imageUrl} | ${
-        err instanceof Error ? err.message : String(err)
-      }`
-    );
+    await uploadPageBufferV610({
+      seriesSlug:
+        params.seriesSlug,
+      chapter:
+        params.chapter,
+      buffer:
+        normalized,
+      pageUrls:
+        params.pageUrls,
+    });
 
-    return [buffer];
+    await yieldForNativeCleanupV610();
+
+    return;
   }
+
+  const partCount =
+    Math.ceil(
+      metadata.height /
+        MAX_IMAGE_HEIGHT
+    );
+
+  logger.info(
+    `SPLIT_STREAM_START | ${metadata.width}x${metadata.height} -> ${partCount} parça | ${params.imageUrl}`
+  );
+
+  for (
+    let top = 0;
+    top < metadata.height;
+    top += MAX_IMAGE_HEIGHT
+  ) {
+    const sliceHeight =
+      Math.min(
+        MAX_IMAGE_HEIGHT,
+        metadata.height - top
+      );
+
+    /*
+     * Yalnız tek parça bellekte tutulur.
+     * B2 yüklemesi bitmeden sonraki parça oluşturulmaz.
+     */
+    const partBuffer =
+      await sharp(
+        params.buffer,
+        {
+          limitInputPixels:
+            false,
+          sequentialRead:
+            true,
+        }
+      )
+        .extract({
+          left:
+            0,
+          top,
+          width:
+            metadata.width,
+          height:
+            sliceHeight,
+        })
+        .jpeg({
+          quality:
+            JPEG_QUALITY,
+          mozjpeg:
+            false,
+        })
+        .toBuffer();
+
+    logger.info(
+      `SPLIT_PART | ${metadata.width}x${metadata.height} | top=${top} | height=${sliceHeight} | ${params.imageUrl}`
+    );
+
+    await uploadPageBufferV610({
+      seriesSlug:
+        params.seriesSlug,
+      chapter:
+        params.chapter,
+      buffer:
+        partBuffer,
+      pageUrls:
+        params.pageUrls,
+    });
+
+    logger.info(
+      `MEMORY_AFTER_PART | Chapter ${params.chapter} | ${formatMemoryUsageV610()}`
+    );
+
+    await yieldForNativeCleanupV610();
+  }
+
+  logger.info(
+    `SPLIT_STREAM_DONE | ${metadata.width}x${metadata.height} -> ${partCount} parça | ${params.imageUrl}`
+  );
 }
 
 export type UploadedChapterResult = {
@@ -271,31 +452,28 @@ export async function uploadChapterImages(params: {
       continue;
     }
 
-    const buffers = await splitImageIfTooLong(buffer, imageUrl);
+    await processAndUploadImageBufferV610({
+      buffer,
+      imageUrl,
+      seriesSlug:
+        params.seriesSlug,
+      chapter:
+        params.chapter,
+      pageUrls,
+    });
 
-    for (const partBuffer of buffers) {
-      const pageNumber = pageUrls.length + 1;
-      const key = `${params.seriesSlug}/${params.chapter}/${pageNumber}.jpg`;
+    logger.info(
+      `MEMORY_AFTER_SOURCE_IMAGE | Chapter ${params.chapter} | Source Index ${
+        i + 1
+      } | ${formatMemoryUsageV610()}`
+    );
 
-      logger.info(
-        `Yükleniyor | Chapter ${params.chapter} | Page ${pageNumber} | ${key}`
-      );
-
-      const publicUrl = await withRetry(
-        () =>
-          uploadBufferToB2({
-            key,
-            buffer: partBuffer,
-            contentType: "image/jpeg",
-          }),
-        5,
-        1500
-      );
-
-      pageUrls.push(publicUrl);
-    }
-
-    await sleep(300);
+    /*
+     * 300ms yerine kısa bir nefes verilir.
+     * Native sharp belleğinin serbest kalmasına fırsat verirken
+     * toplam yüklemeyi gereksiz yere yavaşlatmaz.
+     */
+    await sleep(100);
   }
 
   return {
