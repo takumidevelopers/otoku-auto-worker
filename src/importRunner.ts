@@ -1,4 +1,7 @@
-import { scanNiveraCdnChapters } from "./niveraCdn";
+import {
+  prepareNiveraCdnScanV600,
+  scanPreparedNiveraChapterV600,
+} from "./niveraCdn";
 import { logger } from "./logger";
 import {
   ImportJob,
@@ -1025,23 +1028,24 @@ async function runNiveraCdnJobV410(job: ImportJob): Promise<number> {
   const scanStart = scanStartForFlexibleSourceV5(job);
   const endChap = sourceEndV5(job);
 
-  const chapters = pendingChaptersV5(
-    await scanNiveraCdnChapters({
+  // NIVERA_STREAMING_V6_0_1
+  const preparedScan =
+    await prepareNiveraCdnScanV600({
       sourceUrl: String(job.source_url || ""),
       sourceName: requestedSeriesName,
       startChap: scanStart,
       endChap,
-      maxGroups: 40,
-      pageMax: Number((job as any).page_max || 300),
-      groupMissLimit: 3,
-      pageMissLimit: 3,
-    }),
-    job
-  );
+    });
+
+  const chapterRefs =
+    pendingChaptersV5(
+      preparedScan.chapters,
+      job
+    );
 
   const alreadyCompleted = lastCompletedSourceV5(job);
 
-  if (chapters.length === 0) {
+  if (chapterRefs.length === 0) {
     if (alreadyCompleted !== null && alreadyCompleted >= endChap) {
       const target =
         mode === "append_existing"
@@ -1162,7 +1166,39 @@ async function runNiveraCdnJobV410(job: ImportJob): Promise<number> {
   let lastSourceChapter =
     alreadyCompleted ?? sourceStartV5(job) - 1;
 
-  for (const chapter of chapters) {
+  for (const chapterRef of chapterRefs) {
+    const chapterStartedAt = Date.now();
+
+    await updateImportJobStatus({
+      jobId: job.id,
+      status: "running",
+      seriesId:
+        seriesDbId === null
+          ? undefined
+          : seriesDbId,
+      seriesName,
+      resultSeriesUid: seriesUid,
+      errorMessage: null,
+    });
+
+    logger.info(
+      `Nivera streaming işlem başladı | Kaynak: ${formatChapterNumber(
+        chapterRef.chapter
+      )} | Hedef: ${formatChapterNumber(
+        targetChapterV5(job, chapterRef.chapter)
+      )}`
+    );
+
+    const chapter =
+      await scanPreparedNiveraChapterV600({
+        prepared: preparedScan,
+        chapter: chapterRef,
+        maxGroups: 40,
+        pageMax: Number((job as any).page_max || 300),
+        groupMissLimit: 3,
+        pageMissLimit: 3,
+      });
+
     const targetChapter =
       targetChapterV5(job, chapter.chapter);
 
@@ -1206,7 +1242,9 @@ async function runNiveraCdnJobV410(job: ImportJob): Promise<number> {
     logger.info(
       `Nivera bölüm tamamlandı | Kaynak: ${formatChapterNumber(
         chapter.chapter
-      )} | Hedef: ${eps} | Pages: ${uploadResult.pageCount}`
+      )} | Hedef: ${eps} | Pages: ${uploadResult.pageCount} | Toplam süre: ${Math.round(
+        (Date.now() - chapterStartedAt) / 1000
+      )}s`
     );
   }
 

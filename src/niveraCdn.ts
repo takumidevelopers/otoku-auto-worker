@@ -308,264 +308,774 @@ async function findImageFromBasesV441(
   return null;
 }
 
-// NIVERA_FILENAME_MATRIX_V4_6_1
-const NIVERA_FILENAME_PROBE_BATCH_V461 = 8;
+// NIVERA_FILENAME_FAST_V4_6_2
+type NiveraFilenameTierV462 =
+  | "fast"
+  | "extended";
 
-function uniqueNiveraFilenameBasesV461(
-  values: string[]
-): string[] {
-  return Array.from(
-    new Set(
-      values
-        .map((value) => value.trim())
-        .filter(Boolean)
-    )
-  );
+type NiveraPageFormatV462 =
+  | "raw"
+  | "p2"
+  | "p3"
+  | "p4";
+
+type NiveraFilenamePatternV462 = {
+  id: string;
+  tier: NiveraFilenameTierV462;
+  sequentialOnly: boolean;
+  build: (
+    group: number,
+    page: number
+  ) => string;
+};
+
+type NiveraFilenameCandidateV462 = {
+  pattern: NiveraFilenamePatternV462;
+  base: string;
+};
+
+type NiveraFilenameMatchV462 = {
+  url: string;
+  pattern: NiveraFilenamePatternV462;
+  extension: string;
+};
+
+type NiveraFilenameHintV462 = {
+  patternId: string;
+  extension: string;
+  hits: number;
+};
+
+const NIVERA_FILENAME_HINTS_V462 =
+  new Map<string, NiveraFilenameHintV462>();
+
+const NIVERA_HINT_RECOVERY_USED_V462 =
+  new Set<string>();
+
+const NIVERA_EXTENDED_DISCOVERY_USED_V462 =
+  new Set<string>();
+
+function niveraPageTokenV462(
+  page: number,
+  format: NiveraPageFormatV462
+): string {
+  const raw = String(page);
+
+  if (format === "p2") {
+    return raw.padStart(2, "0");
+  }
+
+  if (format === "p3") {
+    return raw.padStart(3, "0");
+  }
+
+  if (format === "p4") {
+    return raw.padStart(4, "0");
+  }
+
+  return raw;
 }
 
-function buildNiveraFilenameStagesV461(params: {
-  group: number;
-  page: number;
-}): string[][] {
-  const group = String(params.group);
-  const pageRaw = String(params.page);
-  const page2 = pageRaw.padStart(2, "0");
-  const page3 = pageRaw.padStart(3, "0");
-  const page4 = pageRaw.padStart(4, "0");
+function createNiveraFilenamePatternsV462():
+  NiveraFilenamePatternV462[] {
+  const patterns:
+    NiveraFilenamePatternV462[] = [];
 
-  const pageNumbers =
-    uniqueNiveraFilenameBasesV461([
-      pageRaw,
-      page2,
-      page3,
-      page4,
-    ]);
-
-  const stages: string[][] = [];
+  const add = (
+    id: string,
+    tier: NiveraFilenameTierV462,
+    sequentialOnly: boolean,
+    build: (
+      group: number,
+      page: number
+    ) => string
+  ): void => {
+    patterns.push({
+      id,
+      tier,
+      sequentialOnly,
+      build,
+    });
+  };
 
   /*
-   * Önce geçmişte çalışan dört biçim ve en yaygın sıralı biçimler.
-   * 62. bölümdeki 1-kopya.jpg bu aşamada bulunur.
+   * En sık karşılaşılan aileler en başta.
+   * 62. bölümün 1-kopya.jpg biçimi ilk sıradadır.
    */
-  const preferred = [
-    `s${group}_${page3}`,
-    `s${group}-kopya_${page3}`,
-    `${group}_${page3}`,
-    `${group}-kopya_${page3}`,
-  ];
-
-  if (params.group === 1) {
-    preferred.push(
-      `${pageRaw}-kopya`,
-      `${pageRaw}`,
-      `${page3}-kopya`,
-      `${page3}`,
-      `s${pageRaw}-kopya`,
-      `s${pageRaw}`
-    );
-  }
-
-  stages.push(
-    uniqueNiveraFilenameBasesV461(
-      preferred
-    )
+  add(
+    "seq-raw-kopya",
+    "fast",
+    true,
+    (_group, page) =>
+      `${page}-kopya`
   );
 
-  /*
-   * Grup + sayfa kombinasyonları:
-   * s1_001, s1-001, s1.001,
-   * s1-kopya_001, s1_001-kopya,
-   * 1-kopya-001, 1_001-copy vb.
-   */
-  const grouped: string[] = [];
-
-  for (const pageNumber of pageNumbers) {
-    grouped.push(
-      `s${group}_${pageNumber}`,
-      `s${group}-${pageNumber}`,
-      `s${group}.${pageNumber}`,
-
-      `s${group}-kopya_${pageNumber}`,
-      `s${group}-kopya-${pageNumber}`,
-      `s${group}_kopya_${pageNumber}`,
-      `s${group}_kopya-${pageNumber}`,
-      `s${group}_${pageNumber}-kopya`,
-      `s${group}-${pageNumber}-kopya`,
-
-      `s${group}-copy_${pageNumber}`,
-      `s${group}-copy-${pageNumber}`,
-      `s${group}_copy_${pageNumber}`,
-      `s${group}_copy-${pageNumber}`,
-      `s${group}_${pageNumber}-copy`,
-      `s${group}-${pageNumber}-copy`,
-
-      `${group}_${pageNumber}`,
-      `${group}-${pageNumber}`,
-      `${group}.${pageNumber}`,
-
-      `${group}-kopya_${pageNumber}`,
-      `${group}-kopya-${pageNumber}`,
-      `${group}_kopya_${pageNumber}`,
-      `${group}_kopya-${pageNumber}`,
-      `${group}_${pageNumber}-kopya`,
-      `${group}-${pageNumber}-kopya`,
-
-      `${group}-copy_${pageNumber}`,
-      `${group}-copy-${pageNumber}`,
-      `${group}_copy_${pageNumber}`,
-      `${group}_copy-${pageNumber}`,
-      `${group}_${pageNumber}-copy`,
-      `${group}-${pageNumber}-copy`
-    );
-  }
-
-  stages.push(
-    uniqueNiveraFilenameBasesV461(
-      grouped
-    )
+  add(
+    "legacy-s-group-p3",
+    "fast",
+    false,
+    (group, page) =>
+      `s${group}_${String(page).padStart(3, "0")}`
   );
 
-  /*
-   * Grup numarası içermeyen sıralı dosyalar yalnız group=1'de
-   * aranır. Böylece aynı görseller farklı gruplarda tekrar eklenmez.
-   */
-  if (params.group === 1) {
-    const sequential: string[] = [];
+  add(
+    "legacy-s-group-kopya-p3",
+    "fast",
+    false,
+    (group, page) =>
+      `s${group}-kopya_${String(page).padStart(3, "0")}`
+  );
 
-    for (const pageNumber of pageNumbers) {
-      sequential.push(
-        `${pageNumber}-kopya`,
-        `${pageNumber}_kopya`,
-        `${pageNumber}-copy`,
-        `${pageNumber}_copy`,
-        `${pageNumber}`,
+  add(
+    "legacy-group-p3",
+    "fast",
+    false,
+    (group, page) =>
+      `${group}_${String(page).padStart(3, "0")}`
+  );
 
-        `s${pageNumber}-kopya`,
-        `s${pageNumber}_kopya`,
-        `s${pageNumber}-copy`,
-        `s${pageNumber}_copy`,
-        `s${pageNumber}`,
+  add(
+    "legacy-group-kopya-p3",
+    "fast",
+    false,
+    (group, page) =>
+      `${group}-kopya_${String(page).padStart(3, "0")}`
+  );
 
-        `page-${pageNumber}`,
-        `page_${pageNumber}`,
-        `page${pageNumber}`,
+  add(
+    "seq-raw",
+    "fast",
+    true,
+    (_group, page) =>
+      String(page)
+  );
 
-        `sayfa-${pageNumber}`,
-        `sayfa_${pageNumber}`,
-        `sayfa${pageNumber}`,
+  add(
+    "seq-p3-kopya",
+    "fast",
+    true,
+    (_group, page) =>
+      `${String(page).padStart(3, "0")}-kopya`
+  );
 
-        `img-${pageNumber}`,
-        `img_${pageNumber}`,
-        `img${pageNumber}`,
+  add(
+    "seq-p3",
+    "fast",
+    true,
+    (_group, page) =>
+      String(page).padStart(3, "0")
+  );
 
-        `image-${pageNumber}`,
-        `image_${pageNumber}`,
-        `image${pageNumber}`
+  add(
+    "seq-s-raw-kopya",
+    "fast",
+    true,
+    (_group, page) =>
+      `s${page}-kopya`
+  );
+
+  add(
+    "seq-s-raw",
+    "fast",
+    true,
+    (_group, page) =>
+      `s${page}`
+  );
+
+  const formats:
+    NiveraPageFormatV462[] = [
+      "raw",
+      "p2",
+      "p3",
+      "p4",
+    ];
+
+  for (const format of formats) {
+    const token = (
+      page: number
+    ): string =>
+      niveraPageTokenV462(
+        page,
+        format
+      );
+
+    /*
+     * Grup + sayfa:
+     * s1_001, s1-001, s1.001,
+     * 1_001, 1-001, 1.001
+     */
+    add(
+      `group-s-underscore-${format}`,
+      "extended",
+      false,
+      (group, page) =>
+        `s${group}_${token(page)}`
+    );
+
+    add(
+      `group-s-dash-${format}`,
+      "extended",
+      false,
+      (group, page) =>
+        `s${group}-${token(page)}`
+    );
+
+    add(
+      `group-s-dot-${format}`,
+      "extended",
+      false,
+      (group, page) =>
+        `s${group}.${token(page)}`
+    );
+
+    add(
+      `group-underscore-${format}`,
+      "extended",
+      false,
+      (group, page) =>
+        `${group}_${token(page)}`
+    );
+
+    add(
+      `group-dash-${format}`,
+      "extended",
+      false,
+      (group, page) =>
+        `${group}-${token(page)}`
+    );
+
+    add(
+      `group-dot-${format}`,
+      "extended",
+      false,
+      (group, page) =>
+        `${group}.${token(page)}`
+    );
+
+    /*
+     * Grup + kopya/copy + sayfa.
+     */
+    for (
+      const word of
+      ["kopya", "copy"] as const
+    ) {
+      add(
+        `group-s-${word}-dash-underscore-${format}`,
+        "extended",
+        false,
+        (group, page) =>
+          `s${group}-${word}_${token(page)}`
+      );
+
+      add(
+        `group-s-${word}-dash-dash-${format}`,
+        "extended",
+        false,
+        (group, page) =>
+          `s${group}-${word}-${token(page)}`
+      );
+
+      add(
+        `group-s-${word}-underscore-${format}`,
+        "extended",
+        false,
+        (group, page) =>
+          `s${group}_${word}_${token(page)}`
+      );
+
+      add(
+        `group-s-page-${word}-underscore-${format}`,
+        "extended",
+        false,
+        (group, page) =>
+          `s${group}_${token(page)}-${word}`
+      );
+
+      add(
+        `group-s-page-${word}-dash-${format}`,
+        "extended",
+        false,
+        (group, page) =>
+          `s${group}-${token(page)}-${word}`
+      );
+
+      add(
+        `group-${word}-dash-underscore-${format}`,
+        "extended",
+        false,
+        (group, page) =>
+          `${group}-${word}_${token(page)}`
+      );
+
+      add(
+        `group-${word}-dash-dash-${format}`,
+        "extended",
+        false,
+        (group, page) =>
+          `${group}-${word}-${token(page)}`
+      );
+
+      add(
+        `group-${word}-underscore-${format}`,
+        "extended",
+        false,
+        (group, page) =>
+          `${group}_${word}_${token(page)}`
+      );
+
+      add(
+        `group-page-${word}-underscore-${format}`,
+        "extended",
+        false,
+        (group, page) =>
+          `${group}_${token(page)}-${word}`
+      );
+
+      add(
+        `group-page-${word}-dash-${format}`,
+        "extended",
+        false,
+        (group, page) =>
+          `${group}-${token(page)}-${word}`
       );
 
       /*
-       * WordPress'in aynı adlı yüklemelere ekleyebildiği
-       * -1, -2 ... ve kopya-1, copy-1 son ekleri.
+       * Grup içermeyen sıralı biçimler.
        */
-      for (
-        let copyIndex = 1;
-        copyIndex <= 5;
-        copyIndex++
-      ) {
-        sequential.push(
-          `${pageNumber}-kopya-${copyIndex}`,
-          `${pageNumber}_kopya_${copyIndex}`,
-          `${pageNumber}-copy-${copyIndex}`,
-          `${pageNumber}_copy_${copyIndex}`,
-          `${pageNumber}-${copyIndex}`,
+      add(
+        `seq-${word}-dash-${format}`,
+        "extended",
+        true,
+        (_group, page) =>
+          `${token(page)}-${word}`
+      );
 
-          `s${pageNumber}-kopya-${copyIndex}`,
-          `s${pageNumber}_kopya_${copyIndex}`,
-          `s${pageNumber}-copy-${copyIndex}`,
-          `s${pageNumber}_copy_${copyIndex}`,
-          `s${pageNumber}-${copyIndex}`
-        );
-      }
+      add(
+        `seq-${word}-underscore-${format}`,
+        "extended",
+        true,
+        (_group, page) =>
+          `${token(page)}_${word}`
+      );
+
+      add(
+        `seq-s-${word}-dash-${format}`,
+        "extended",
+        true,
+        (_group, page) =>
+          `s${token(page)}-${word}`
+      );
+
+      add(
+        `seq-s-${word}-underscore-${format}`,
+        "extended",
+        true,
+        (_group, page) =>
+          `s${token(page)}_${word}`
+      );
     }
 
-    stages.push(
-      uniqueNiveraFilenameBasesV461(
-        sequential
-      )
+    /*
+     * page/sayfa/img/image önekleri.
+     */
+    for (
+      const prefix of
+      ["page", "sayfa", "img", "image"] as const
+    ) {
+      add(
+        `seq-${prefix}-dash-${format}`,
+        "extended",
+        true,
+        (_group, page) =>
+          `${prefix}-${token(page)}`
+      );
+
+      add(
+        `seq-${prefix}-underscore-${format}`,
+        "extended",
+        true,
+        (_group, page) =>
+          `${prefix}_${token(page)}`
+      );
+
+      add(
+        `seq-${prefix}-plain-${format}`,
+        "extended",
+        true,
+        (_group, page) =>
+          `${prefix}${token(page)}`
+      );
+    }
+
+    /*
+     * p/page/sayfa işaretli grup biçimleri.
+     */
+    add(
+      `group-s-p-${format}`,
+      "extended",
+      false,
+      (group, page) =>
+        `s${group}p${token(page)}`
+    );
+
+    add(
+      `group-p-${format}`,
+      "extended",
+      false,
+      (group, page) =>
+        `${group}p${token(page)}`
+    );
+
+    add(
+      `group-s-page-${format}`,
+      "extended",
+      false,
+      (group, page) =>
+        `s${group}-page-${token(page)}`
+    );
+
+    add(
+      `group-page-${format}`,
+      "extended",
+      false,
+      (group, page) =>
+        `${group}-page-${token(page)}`
+    );
+
+    add(
+      `group-s-sayfa-${format}`,
+      "extended",
+      false,
+      (group, page) =>
+        `s${group}-sayfa-${token(page)}`
+    );
+
+    add(
+      `group-sayfa-${format}`,
+      "extended",
+      false,
+      (group, page) =>
+        `${group}-sayfa-${token(page)}`
+    );
+
+    /*
+     * Bitişik grup-sayfa biçimleri.
+     */
+    add(
+      `group-s-joined-${format}`,
+      "extended",
+      false,
+      (group, page) =>
+        `s${group}${token(page)}`
+    );
+
+    add(
+      `group-joined-${format}`,
+      "extended",
+      false,
+      (group, page) =>
+        `${group}${token(page)}`
     );
   }
 
   /*
-   * Daha nadir bitişik, p/page ve sayfa işaretli biçimler.
+   * WordPress kopya numarası ekleri:
+   * 1-kopya-1, 1-copy-2, s1-kopya-3 vb.
    */
-  const rare: string[] = [];
+  for (
+    let copyIndex = 1;
+    copyIndex <= 5;
+    copyIndex++
+  ) {
+    add(
+      `seq-raw-kopya-${copyIndex}`,
+      "extended",
+      true,
+      (_group, page) =>
+        `${page}-kopya-${copyIndex}`
+    );
 
-  for (const pageNumber of pageNumbers) {
-    rare.push(
-      `s${group}${pageNumber}`,
-      `${group}${pageNumber}`,
-      `s${group}p${pageNumber}`,
-      `${group}p${pageNumber}`,
+    add(
+      `seq-raw-copy-${copyIndex}`,
+      "extended",
+      true,
+      (_group, page) =>
+        `${page}-copy-${copyIndex}`
+    );
 
-      `s${group}-page-${pageNumber}`,
-      `s${group}_page_${pageNumber}`,
-      `${group}-page-${pageNumber}`,
-      `${group}_page_${pageNumber}`,
+    add(
+      `seq-s-raw-kopya-${copyIndex}`,
+      "extended",
+      true,
+      (_group, page) =>
+        `s${page}-kopya-${copyIndex}`
+    );
 
-      `s${group}-sayfa-${pageNumber}`,
-      `s${group}_sayfa_${pageNumber}`,
-      `${group}-sayfa-${pageNumber}`,
-      `${group}_sayfa_${pageNumber}`
+    add(
+      `seq-s-raw-copy-${copyIndex}`,
+      "extended",
+      true,
+      (_group, page) =>
+        `s${page}-copy-${copyIndex}`
+    );
+
+    add(
+      `seq-raw-duplicate-${copyIndex}`,
+      "extended",
+      true,
+      (_group, page) =>
+        `${page}-${copyIndex}`
     );
   }
 
-  stages.push(
-    uniqueNiveraFilenameBasesV461(
-      rare
-    )
-  );
+  return patterns;
+}
 
-  return stages.filter(
-    (stage) => stage.length > 0
+const NIVERA_FILENAME_PATTERNS_V462 =
+  createNiveraFilenamePatternsV462();
+
+function buildNiveraFilenameCandidatesV462(params: {
+  group: number;
+  page: number;
+  tier?: NiveraFilenameTierV462;
+}): NiveraFilenameCandidateV462[] {
+  const candidates:
+    NiveraFilenameCandidateV462[] = [];
+
+  const seen =
+    new Set<string>();
+
+  for (
+    const pattern of
+    NIVERA_FILENAME_PATTERNS_V462
+  ) {
+    if (
+      params.tier &&
+      pattern.tier !== params.tier
+    ) {
+      continue;
+    }
+
+    if (
+      pattern.sequentialOnly &&
+      params.group !== 1
+    ) {
+      continue;
+    }
+
+    const base =
+      pattern.build(
+        params.group,
+        params.page
+      );
+
+    if (
+      !base ||
+      seen.has(base)
+    ) {
+      continue;
+    }
+
+    seen.add(base);
+
+    candidates.push({
+      pattern,
+      base,
+    });
+  }
+
+  return candidates;
+}
+
+function findNiveraPatternV462(
+  patternId: string
+): NiveraFilenamePatternV462 | null {
+  return (
+    NIVERA_FILENAME_PATTERNS_V462.find(
+      (pattern) =>
+        pattern.id === patternId
+    ) ||
+    null
   );
 }
 
-async function findNiveraFilenameFromStagesV461(params: {
+async function probeNiveraImageQuickV462(
+  url: string,
+  mode:
+    | "standard"
+    | "extended"
+): Promise<boolean> {
+  const headTimeout =
+    mode === "extended"
+      ? 1200
+      : 2500;
+
+  const getTimeout =
+    mode === "extended"
+      ? 1800
+      : 3500;
+
+  try {
+    const response =
+      await axios.head(url, {
+        timeout: headTimeout,
+        maxRedirects: 2,
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/149 Safari/537.36",
+          Accept:
+            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+          Referer:
+            `https://${DEFAULT_NIVERA_HOST}/`,
+        },
+        validateStatus: () => true,
+      });
+
+    const contentType =
+      String(
+        response.headers[
+          "content-type"
+        ] || ""
+      ).toLowerCase();
+
+    if (
+      (
+        response.status === 200 ||
+        response.status === 206
+      ) &&
+      (
+        contentType.startsWith(
+          "image/"
+        ) ||
+        !contentType
+      )
+    ) {
+      return true;
+    }
+
+    if (
+      ![400, 403, 405, 501].includes(
+        response.status
+      )
+    ) {
+      return false;
+    }
+  } catch {
+    /*
+     * HEAD bağlantısı koptuysa aşağıdaki küçük Range GET denenir.
+     */
+  }
+
+  try {
+    const response =
+      await axios.get(url, {
+        responseType: "stream",
+        timeout: getTimeout,
+        maxRedirects: 2,
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/149 Safari/537.36",
+          Accept:
+            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+          Range: "bytes=0-0",
+          Referer:
+            `https://${DEFAULT_NIVERA_HOST}/`,
+        },
+        validateStatus: () => true,
+      });
+
+    const contentType =
+      String(
+        response.headers[
+          "content-type"
+        ] || ""
+      ).toLowerCase();
+
+    const ok =
+      (
+        response.status === 200 ||
+        response.status === 206
+      ) &&
+      (
+        contentType.startsWith(
+          "image/"
+        ) ||
+        !contentType
+      );
+
+    destroyStream(response);
+
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+async function probeNiveraCandidateSetV462(params: {
   chapterRoot: string;
-  stages: string[][];
-}): Promise<string | null> {
-  for (const stage of params.stages) {
-    const bases = stage.map(
-      (candidate) =>
-        `${params.chapterRoot}${candidate}`
-    );
+  candidates:
+    NiveraFilenameCandidateV462[];
+  extensions: readonly string[];
+  mode:
+    | "standard"
+    | "extended";
+  batchSize: number;
+}): Promise<NiveraFilenameMatchV462 | null> {
+  for (
+    const extension of
+    params.extensions
+  ) {
+    for (
+      let start = 0;
+      start < params.candidates.length;
+      start += params.batchSize
+    ) {
+      const batch =
+        params.candidates.slice(
+          start,
+          start + params.batchSize
+        );
 
-    for (const extension of IMAGE_EXTENSIONS) {
-      for (
-        let start = 0;
-        start < bases.length;
-        start +=
-          NIVERA_FILENAME_PROBE_BATCH_V461
-      ) {
-        const batch = bases
-          .slice(
-            start,
-            start +
-              NIVERA_FILENAME_PROBE_BATCH_V461
+      const results =
+        await Promise.all(
+          batch.map(
+            async (
+              candidate
+            ) => {
+              const url =
+                `${params.chapterRoot}` +
+                `${candidate.base}.` +
+                `${extension}`;
+
+              const exists =
+                await probeNiveraImageQuickV462(
+                  url,
+                  params.mode
+                );
+
+              return exists
+                ? {
+                    url,
+                    pattern:
+                      candidate.pattern,
+                    extension,
+                  }
+                : null;
+            }
           )
-          .map(
-            (base) =>
-              `${base}.${extension}`
-          );
+        );
 
-        const found =
-          await findFirstExistingUrlV441(
-            batch
-          );
+      const found =
+        results.find(
+          (
+            result
+          ): result is
+            NiveraFilenameMatchV462 =>
+            Boolean(result)
+        );
 
-        if (found) {
-          return found;
-        }
+      if (found) {
+        return found;
       }
     }
   }
@@ -573,19 +1083,292 @@ async function findNiveraFilenameFromStagesV461(params: {
   return null;
 }
 
+function rememberNiveraFilenameMatchV462(
+  chapterRoot: string,
+  match: NiveraFilenameMatchV462
+): void {
+  const previous =
+    NIVERA_FILENAME_HINTS_V462.get(
+      chapterRoot
+    );
+
+  const hits =
+    previous &&
+    previous.patternId ===
+      match.pattern.id &&
+    previous.extension ===
+      match.extension
+      ? previous.hits + 1
+      : 1;
+
+  NIVERA_FILENAME_HINTS_V462.set(
+    chapterRoot,
+    {
+      patternId:
+        match.pattern.id,
+      extension:
+        match.extension,
+      hits,
+    }
+  );
+
+  if (
+    !previous ||
+    previous.patternId !==
+      match.pattern.id ||
+    previous.extension !==
+      match.extension
+  ) {
+    logger.info(
+      [
+        "Nivera dosya kalıbı seçildi",
+        `Pattern: ${match.pattern.id}`,
+        `Extension: ${match.extension}`,
+        `Root: ${chapterRoot}`,
+      ].join(" | ")
+    );
+  }
+}
+
 async function findChapterPageVariantV430(params: {
   chapterRoot: string;
   group: number;
   page: number;
 }): Promise<string | null> {
-  return findNiveraFilenameFromStagesV461({
-    chapterRoot: params.chapterRoot,
-    stages:
-      buildNiveraFilenameStagesV461({
-        group: params.group,
-        page: params.page,
-      }),
-  });
+  const hint =
+    NIVERA_FILENAME_HINTS_V462.get(
+      params.chapterRoot
+    );
+
+  if (hint) {
+    const pattern =
+      findNiveraPatternV462(
+        hint.patternId
+      );
+
+    /*
+     * Grup içermeyen sıralı aile seçildiyse group=2 ve sonrası
+     * aynı görselleri tekrar aramaz.
+     */
+    if (
+      pattern?.sequentialOnly &&
+      params.group !== 1
+    ) {
+      return null;
+    }
+
+    if (pattern) {
+      const base =
+        pattern.build(
+          params.group,
+          params.page
+        );
+
+      const url =
+        `${params.chapterRoot}` +
+        `${base}.` +
+        `${hint.extension}`;
+
+      if (
+        await probeNiveraImageQuickV462(
+          url,
+          "standard"
+        )
+      ) {
+        rememberNiveraFilenameMatchV462(
+          params.chapterRoot,
+          {
+            url,
+            pattern,
+            extension:
+              hint.extension,
+          }
+        );
+
+        return url;
+      }
+    }
+
+    /*
+     * Aynı kalıp en az iki sayfada doğrulandıktan sonra bir sayfa
+     * kaybolursa devasa matrisi yeniden taramayız. Yalnız bir kez
+     * yaygın biçimlerle kurtarma aranır.
+     */
+    if (hint.hits >= 2) {
+      if (
+        NIVERA_HINT_RECOVERY_USED_V462.has(
+          params.chapterRoot
+        )
+      ) {
+        return null;
+      }
+
+      NIVERA_HINT_RECOVERY_USED_V462.add(
+        params.chapterRoot
+      );
+
+      const recovery =
+        await probeNiveraCandidateSetV462({
+          chapterRoot:
+            params.chapterRoot,
+          candidates:
+            buildNiveraFilenameCandidatesV462({
+              group:
+                params.group,
+              page:
+                params.page,
+              tier:
+                "fast",
+            }),
+          extensions: [
+            "jpg",
+            "jpeg",
+            "webp",
+            "png",
+          ],
+          mode:
+            "standard",
+          batchSize:
+            10,
+        });
+
+      if (recovery) {
+        rememberNiveraFilenameMatchV462(
+          params.chapterRoot,
+          recovery
+        );
+
+        return recovery.url;
+      }
+
+      return null;
+    }
+  }
+
+  const fastCandidates =
+    buildNiveraFilenameCandidatesV462({
+      group: params.group,
+      page: params.page,
+      tier: "fast",
+    });
+
+  /*
+   * Bilinen 1-kopya.jpg biçimini tek istekle önce kontrol et.
+   * Böylece geniş matrise girmeden 62. bölüm hızla çözülür.
+   */
+  const firstFast =
+    fastCandidates[0];
+
+  if (firstFast) {
+    const directUrl =
+      `${params.chapterRoot}` +
+      `${firstFast.base}.jpg`;
+
+    if (
+      await probeNiveraImageQuickV462(
+        directUrl,
+        "standard"
+      )
+    ) {
+      const match = {
+        url: directUrl,
+        pattern:
+          firstFast.pattern,
+        extension:
+          "jpg",
+      };
+
+      rememberNiveraFilenameMatchV462(
+        params.chapterRoot,
+        match
+      );
+
+      return directUrl;
+    }
+  }
+
+  const fastMatch =
+    await probeNiveraCandidateSetV462({
+      chapterRoot:
+        params.chapterRoot,
+      candidates:
+        fastCandidates,
+      extensions: [
+        "jpg",
+        "jpeg",
+        "webp",
+        "png",
+      ],
+      mode:
+        "standard",
+      batchSize:
+        10,
+    });
+
+  if (fastMatch) {
+    rememberNiveraFilenameMatchV462(
+      params.chapterRoot,
+      fastMatch
+    );
+
+    return fastMatch.url;
+  }
+
+  /*
+   * Geniş güvenlik matrisi yalnız ilk sayfada ve chapter root başına
+   * bir kez çalışır. Sonraki boş sayfalarda yüzlerce URL denenmez.
+   */
+  if (
+    params.page !== 1 ||
+    NIVERA_EXTENDED_DISCOVERY_USED_V462.has(
+      params.chapterRoot
+    )
+  ) {
+    return null;
+  }
+
+  NIVERA_EXTENDED_DISCOVERY_USED_V462.add(
+    params.chapterRoot
+  );
+
+  const extendedMatch =
+    await probeNiveraCandidateSetV462({
+      chapterRoot:
+        params.chapterRoot,
+      candidates:
+        buildNiveraFilenameCandidatesV462({
+          group:
+            params.group,
+          page:
+            params.page,
+          tier:
+            "extended",
+        }),
+      extensions: [
+        "jpg",
+        "jpeg",
+        "webp",
+        "png",
+        "avif",
+        "jfif",
+        "gif",
+      ],
+      mode:
+        "extended",
+      batchSize:
+        16,
+    });
+
+  if (extendedMatch) {
+    rememberNiveraFilenameMatchV462(
+      params.chapterRoot,
+      extendedMatch
+    );
+
+    return extendedMatch.url;
+  }
+
+  return null;
 }
 // NIVERA_THIRD_ROOT_V4_5_1
 function buildNiveraSeriesRootsV430(
@@ -753,6 +1536,135 @@ function buildFallbackChapterIndex(startChap: number, endChap: number) {
   }
 
   return chapters;
+}
+
+// NIVERA_STREAMING_V6_0_1
+export type NiveraCdnChapterRefV600 = {
+  chapter: number;
+  sourceChapter: string;
+  chapterSlug: string;
+};
+
+export type PreparedNiveraCdnScanV600 = {
+  config: NiveraCdnConfig;
+  chapters: NiveraCdnChapterRefV600[];
+};
+
+export async function prepareNiveraCdnScanV600(params: {
+  sourceUrl: string;
+  sourceName?: string;
+  startChap: number;
+  endChap: number;
+}): Promise<PreparedNiveraCdnScanV600> {
+  const config = extractNiveraCdnConfig({
+    sourceUrl: params.sourceUrl,
+    sourceName: params.sourceName,
+  });
+
+  const startChap = Number(params.startChap);
+  const endChap = Number(params.endChap);
+
+  if (
+    !Number.isFinite(startChap) ||
+    !Number.isFinite(endChap) ||
+    startChap > endChap
+  ) {
+    throw new Error(
+      `Nivera bölüm aralığı geçersiz: ${params.startChap}-${params.endChap}`
+    );
+  }
+
+  logger.info(
+    `Nivera streaming hazırlığı başladı | Seri: ${config.seriesSlug} | Range: ${startChap}-${endChap}`
+  );
+
+  let chapterIndex: NiveraCdnChapterRefV600[] = [];
+
+  try {
+    chapterIndex = await fetchChapterSlugs(config.seriesSlug);
+
+    logger.info(
+      `Nivera chapter endpoint sonucu | Toplam: ${chapterIndex.length}`
+    );
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : String(error);
+
+    logger.warn(
+      `Nivera chapter endpoint kullanılamadı; sayısal CDN indeksine geçiliyor. ${message}`
+    );
+  }
+
+  const chapters =
+    (
+      chapterIndex.length > 0
+        ? chapterIndex
+        : buildFallbackChapterIndex(startChap, endChap)
+    )
+      .filter(
+        (item) =>
+          item.chapter >= startChap &&
+          item.chapter <= endChap
+      )
+      .sort((a, b) => a.chapter - b.chapter);
+
+  if (chapters.length === 0) {
+    throw new Error(
+      `Nivera bölüm listesinde ${startChap}-${endChap} aralığında bölüm bulunamadı.`
+    );
+  }
+
+  logger.info(
+    `Nivera streaming bölüm listesi hazır | Seçilen: ${chapters.length}`
+  );
+
+  return {
+    config,
+    chapters,
+  };
+}
+
+export async function scanPreparedNiveraChapterV600(params: {
+  prepared: PreparedNiveraCdnScanV600;
+  chapter: NiveraCdnChapterRefV600;
+  maxGroups?: number;
+  pageMax?: number;
+  groupMissLimit?: number;
+  pageMissLimit?: number;
+}): Promise<NiveraCdnChapter> {
+  const startedAt = Date.now();
+
+  logger.info(
+    `Nivera tek bölüm keşfi başladı | Chapter: ${params.chapter.chapter} | Folder: ${params.chapter.chapterSlug}`
+  );
+
+  const imageUrls = await scanChapterImages({
+    config: params.prepared.config,
+    chapterSlug: params.chapter.chapterSlug,
+    maxGroups: Number(params.maxGroups || 40),
+    pageMax: Number(params.pageMax || 300),
+    groupMissLimit: Number(params.groupMissLimit || 3),
+    pageMissLimit: Number(params.pageMissLimit || 3),
+  });
+
+  if (imageUrls.length === 0) {
+    throw new Error(
+      `Nivera CDN bölüm görselleri üç kökte de bulunamadı. Chapter: ${params.chapter.chapter} | Folder: ${params.chapter.chapterSlug}`
+    );
+  }
+
+  logger.info(
+    `Nivera tek bölüm keşfi tamamlandı | Chapter: ${params.chapter.chapter} | Görsel: ${imageUrls.length} | Süre: ${Math.round((Date.now() - startedAt) / 1000)}s`
+  );
+
+  return {
+    chapter: params.chapter.chapter,
+    sourceChapter: params.chapter.sourceChapter,
+    chapterSlug: params.chapter.chapterSlug,
+    imageUrls,
+  };
 }
 
 export async function scanNiveraCdnChapters(params: {
